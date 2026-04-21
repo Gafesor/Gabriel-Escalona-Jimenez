@@ -1,0 +1,6 @@
+{
+  "name": "CubeUp3 Estimator",
+  "description": "3D printing quoting calculator for CubeUp³ with local profile management.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
