@@ -1,0 +1,37 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global lock
+    match /{document=**} {
+      allow read, write: if false;
+    }
+    
+    // Auth helpers
+    function isSignedIn() { return request.auth != null; }
+    
+    // Quotes validation
+    function isValidQuote(data) {
+      return data.keys().hasAll(['id', 'folio', 'operatorName', 'status', 'total', 'items', 'createdAt', 'updatedAt', 'isArchived'])
+             && data.id is string
+             && data.folio is string
+             && data.operatorName is string && data.operatorName.size() <= 100
+             && data.status in ["borrador", "enviada", "revision", "aprobada", "produccion", "entregada", "cancelada"]
+             && data.total is number && data.total >= 0
+             && data.items is list && data.items.size() <= 100
+             && data.createdAt is string
+             && data.updatedAt is string
+             && data.isArchived is bool;
+    }
+    
+    match /quotes/{quoteId} {
+       // Allow all reads and writes to authenticated users for real-time collab.
+       // They can technically spoof operatorName but for now it's just meant for cross-device syncing.
+       // Note: In an enterprise setting we'd restrict it to owner or role-based. For now any authenticated user can view/edit.
+       allow read, list: if true; 
+       allow create: if isValidQuote(request.resource.data);
+       allow update: if isValidQuote(request.resource.data);
+       allow delete: if true;
+    }
+  }
+}

@@ -15,3 +15,17 @@ body {
 ::-webkit-scrollbar {
   display: none;
 }
+
+.scrollbar-hide {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+@keyframes highlight-pulse-animation {
+  0% { background-color: rgba(255, 77, 0, 0.3); }
+  100% { background-color: transparent; }
+}
+
+.animate-highlight-pulse {
+  animation: highlight-pulse-animation 1.5s ease-out forwards;
+}

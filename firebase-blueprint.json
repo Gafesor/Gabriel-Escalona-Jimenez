@@ -1,0 +1,69 @@
+{
+  "entities": {
+    "quote": {
+      "title": "Quote",
+      "description": "A customized quote for additive manufacturing services",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "The unique identifier of the quote"
+        },
+        "folio": {
+          "type": "string",
+          "description": "The human-readable folio number"
+        },
+        "clientName": {
+          "type": "string",
+          "description": "The name of the client or project"
+        },
+        "operatorName": {
+          "type": "string",
+          "description": "The name of the operator or sales rep"
+        },
+        "operatorProfileId": {
+          "type": "string",
+          "description": "The ID of the operator's profile if selected from preset"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["borrador", "enviada", "revision", "aprobada", "produccion", "entregada", "cancelada"],
+          "description": "The lifecycle status of the quote"
+        },
+        "total": {
+          "type": "number",
+          "description": "The total price of the quote"
+        },
+        "items": {
+          "type": "array",
+          "description": "The items in the quote"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "The ISO string of creation date"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "The ISO string of last update date"
+        },
+        "notes": {
+          "type": "string",
+          "description": "Internal notes"
+        },
+        "isArchived": {
+          "type": "boolean",
+          "description": "Whether the quote is archived"
+        }
+      },
+      "required": ["id", "folio", "operatorName", "status", "total", "items", "createdAt", "updatedAt", "isArchived"]
+    }
+  },
+  "firestore": {
+    "/quotes/{quoteId}": {
+      "schema": "quote",
+      "description": "Stores all the quotes across the company (real-time drafts included)"
+    }
+  }
+}

@@ -1,0 +1,53 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global lock
+    match /{document=**} {
+      allow read, write: if false;
+    }
+    
+    // Auth helpers
+    function isSignedIn() { return request.auth != null; }
+    function isValidId(id) { return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+    
+    // Quotes validation
+    function isValidQuote(data) {
+      return data.keys().hasAll(['id', 'ownerId', 'folio', 'operatorName', 'status', 'total', 'items', 'createdAt', 'updatedAt', 'isArchived'])
+             && data.id is string
+             && data.ownerId is string && data.ownerId == request.auth.uid
+             && data.folio is string
+             && data.operatorName is string && data.operatorName.size() <= 100
+             && data.status in ["borrador", "enviada", "revision", "aprobada", "produccion", "entregada", "cancelada"]
+             && data.total is number && data.total >= 0
+             && data.items is list && data.items.size() <= 100
+             && data.createdAt is string && data.createdAt.size() <= 64
+             && data.updatedAt is string && data.updatedAt.size() <= 64
+             && data.isArchived is bool;
+    }
+
+    function isValidUpdate(data) {
+      return data.keys().hasAll(['id', 'ownerId', 'folio', 'operatorName', 'status', 'total', 'items', 'createdAt', 'updatedAt', 'isArchived'])
+             && data.id is string
+             && data.ownerId is string
+             && data.folio is string
+             && data.operatorName is string && data.operatorName.size() <= 100
+             && data.status in ["borrador", "enviada", "revision", "aprobada", "produccion", "entregada", "cancelada"]
+             && data.total is number && data.total >= 0
+             && data.items is list && data.items.size() <= 100
+             && data.createdAt == existing().createdAt
+             && data.updatedAt is string && data.updatedAt.size() <= 64
+             && data.isArchived is bool;
+    }
+    
+    match /quotes/{quoteId} {
+       allow list: if isSignedIn() && resource.data.ownerId == request.auth.uid;
+       allow get: if isSignedIn() && isValidId(quoteId) && resource.data.ownerId == request.auth.uid;
+       allow create: if isSignedIn() && isValidId(quoteId) && isValidQuote(incoming());
+       allow update: if isSignedIn() && isValidId(quoteId) && isValidUpdate(incoming()) && incoming().ownerId == existing().ownerId;
+       allow delete: if isSignedIn() && isValidId(quoteId) && resource.data.ownerId == request.auth.uid;
+    }
+  }
+}
