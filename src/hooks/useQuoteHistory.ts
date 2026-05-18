@@ -21,6 +21,9 @@ export interface TicketItem {
   unitPrice: number;
   totalPrice: number;
   itemType?: 'print' | 'hardware';
+  profileId?: string;
+  marginInfo?: number;
+  laborInfo?: number;
 }
 
 export interface StatusEvent {
@@ -52,8 +55,7 @@ export const useQuoteHistory = () => {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    if (!auth.currentUser) return;
-    const q = query(collection(db, 'quotes'), where('ownerId', '==', auth.currentUser.uid));
+    const q = query(collection(db, 'quotes'));
     
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const fetchedQuotes: Quote[] = [];
@@ -79,8 +81,6 @@ export const useQuoteHistory = () => {
   }, []);
 
   const saveQuoteSafe = useCallback(async (items: TicketItem[], operatorName: string, clientName: string, notes: string, existingId?: string): Promise<Quote> => {
-    if (!auth.currentUser) throw new Error("Not logged in");
-    
     const total = items.reduce((acc, it) => acc + it.totalPrice, 0);
     const now = new Date().toISOString();
     
@@ -110,7 +110,7 @@ export const useQuoteHistory = () => {
     const newId = Date.now().toString() + Math.random().toString(36).substring(2, 9);
     const finalQuote: Quote = {
       id: newId,
-      ownerId: auth.currentUser.uid,
+      ownerId: "public",
       folio: getNextFolio(),
       clientName,
       operatorName,
@@ -197,7 +197,6 @@ export const useQuoteHistory = () => {
   }, [quotes]);
 
   const cloneQuote = useCallback(async (quoteId: string): Promise<Quote | null> => {
-    if(!auth.currentUser) return null;
     const original = quotes.find(q => q.id === quoteId);
     if (!original) return null;
     
@@ -205,7 +204,7 @@ export const useQuoteHistory = () => {
     const newId = Date.now().toString() + Math.random().toString(36).substring(2, 9);
     const cloned: Quote = {
       id: newId,
-      ownerId: auth.currentUser.uid,
+      ownerId: "public",
       folio: getNextFolio(),
       clientName: original.clientName + ' (Copia)',
       operatorName: original.operatorName,

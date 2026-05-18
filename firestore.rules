@@ -17,7 +17,7 @@ service cloud.firestore {
     function isValidQuote(data) {
       return data.keys().hasAll(['id', 'ownerId', 'folio', 'operatorName', 'status', 'total', 'items', 'createdAt', 'updatedAt', 'isArchived'])
              && data.id is string
-             && data.ownerId is string && data.ownerId == request.auth.uid
+             && data.ownerId is string
              && data.folio is string
              && data.operatorName is string && data.operatorName.size() <= 100
              && data.status in ["borrador", "enviada", "revision", "aprobada", "produccion", "entregada", "cancelada"]
@@ -43,11 +43,10 @@ service cloud.firestore {
     }
     
     match /quotes/{quoteId} {
-       allow list: if isSignedIn() && resource.data.ownerId == request.auth.uid;
-       allow get: if isSignedIn() && isValidId(quoteId) && resource.data.ownerId == request.auth.uid;
-       allow create: if isSignedIn() && isValidId(quoteId) && isValidQuote(incoming());
-       allow update: if isSignedIn() && isValidId(quoteId) && isValidUpdate(incoming()) && incoming().ownerId == existing().ownerId;
-       allow delete: if isSignedIn() && isValidId(quoteId) && resource.data.ownerId == request.auth.uid;
+       allow read: if true;
+       allow create: if isValidId(quoteId) && isValidQuote(incoming());
+       allow update: if isValidId(quoteId) && isValidUpdate(incoming());
+       allow delete: if true;
     }
   }
 }

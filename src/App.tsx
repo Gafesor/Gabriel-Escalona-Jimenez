@@ -23,7 +23,7 @@ const DEFAULT_PROFILES = [
 
 export const formatMXN = (val: number) => new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN' }).format(val);
 
-function MainApp({ user }: { user: any }) {
+function MainApp() {
   const [currentTab, setCurrentTab] = useState<'calculator' | 'history'>('calculator');
   const [ticketItems, setTicketItems] = useState<TicketItem[]>([]);
   const [savedQuoteId, setSavedQuoteId] = useState<string | null>(null);
@@ -106,6 +106,7 @@ function MainApp({ user }: { user: any }) {
   // Hardware form
   const [hwName, setHwName] = useState('');
   const [hwPrice, setHwPrice] = useState<number | ''>('');
+  const [editItemId, setEditItemId] = useState<string | null>(null);
 
   const { saveQuote, quotes } = useQuoteHistory();
 
@@ -136,8 +137,8 @@ function MainApp({ user }: { user: any }) {
     const base = materialCost + machineCost + labor;
     const withMargin = base * (1 + (margin / 100));
 
-    setTicketItems([...ticketItems, {
-      id: Math.random().toString(),
+    const newItem = {
+      id: editItemId || Math.random().toString(),
       itemName: itemName,
       quantity: 1,
       profileName: profile.name,
@@ -145,8 +146,18 @@ function MainApp({ user }: { user: any }) {
       timeInfo: h,
       unitPrice: withMargin,
       totalPrice: withMargin,
-      itemType: 'print'
-    }]);
+      itemType: 'print' as const,
+      profileId: profile.id,
+      marginInfo: margin,
+      laborInfo: labor
+    };
+
+    if (editItemId) {
+      setTicketItems(ticketItems.map(item => item.id === editItemId ? newItem : item));
+      setEditItemId(null);
+    } else {
+      setTicketItems([...ticketItems, newItem]);
+    }
     
     setItemName('');
     setWeight('');
@@ -159,8 +170,8 @@ function MainApp({ user }: { user: any }) {
     e.preventDefault();
     if (!hwName || hwPrice === '') return;
     const price = Number(hwPrice);
-    setTicketItems([...ticketItems, {
-      id: Math.random().toString(),
+    const newItem = {
+      id: editItemId || Math.random().toString(),
       itemName: hwName,
       quantity: 1,
       profileName: 'Hardware Adicional',
@@ -168,10 +179,48 @@ function MainApp({ user }: { user: any }) {
       timeInfo: 0,
       unitPrice: price,
       totalPrice: price,
-      itemType: 'hardware'
-    }]);
+      itemType: 'hardware' as const
+    };
+
+    if (editItemId) {
+      setTicketItems(ticketItems.map(item => item.id === editItemId ? newItem : item));
+      setEditItemId(null);
+    } else {
+      setTicketItems([...ticketItems, newItem]);
+    }
     setHwName('');
     setHwPrice('');
+  };
+
+  const cancelEdit = () => {
+    setEditItemId(null);
+    setItemName('');
+    setWeight('');
+    setHours('');
+    setPieceMargin('');
+    setPieceLabor('');
+    setHwName('');
+    setHwPrice('');
+  };
+
+  const handleEditItemInfo = (item: TicketItem) => {
+    setEditItemId(item.id);
+    if (item.itemType === 'hardware') {
+      setHwName(item.itemName);
+      setHwPrice(item.unitPrice.toString() as any);
+      // scroll to hardware form
+    } else {
+      setItemName(item.itemName);
+      if (item.profileId && profiles.some(p => p.id === item.profileId)) {
+        setProfileId(item.profileId);
+      }
+      setWeight(item.weightInfo.toString() as any);
+      setHours(item.timeInfo.toString() as any);
+      if (item.marginInfo !== undefined) setPieceMargin(item.marginInfo.toString() as any);
+      else setPieceMargin('');
+      if (item.laborInfo !== undefined) setPieceLabor(item.laborInfo.toString() as any);
+      else setPieceLabor('');
+    }
   };
 
   const handleSave = async () => {
@@ -223,12 +272,9 @@ function MainApp({ user }: { user: any }) {
 
         <div className="flex items-center gap-4 w-1/4 justify-end">
           <div className="text-right hidden sm:block">
-            <p className="text-xs font-bold text-gray-900">{user.displayName || 'Usuario'}</p>
-            <p className="text-[10px] text-emerald-800">{user.email}</p>
+            <p className="text-xs font-bold text-gray-900">Usuario Público</p>
+            <p className="text-[10px] text-emerald-800">Acceso Compartido</p>
           </div>
-          <button onClick={() => signOut(auth)} className="p-2 text-emerald-800 hover:bg-[#D1FAE5] rounded-lg transition-colors border border-transparent hover:border-[#A7F3D0]">
-            <LogOut size={16} />
-          </button>
         </div>
       </header>
 
@@ -341,9 +387,20 @@ function MainApp({ user }: { user: any }) {
                     </div>
                   </div>
 
-                  <button type="submit" disabled={!itemName || weight==='' || hours===''} className="mt-2 w-full bg-[#059669] text-white py-3 rounded-xl font-bold uppercase tracking-widest text-xs flex items-center justify-center gap-2 hover:bg-emerald-800 active:scale-[0.98] transition-all disabled:opacity-50 disabled:active:scale-100 shadow-md">
-                    <Plus size={16}/> Añadir al Ticket
-                  </button>
+                  {editItemId && ticketItems.find(i => i.id === editItemId)?.itemType !== 'hardware' ? (
+                    <div className="grid grid-cols-2 gap-2 mt-2">
+                      <button type="submit" disabled={!itemName || weight==='' || hours===''} className="w-full bg-[#059669] text-white py-3 rounded-xl font-bold uppercase tracking-widest text-xs flex items-center justify-center gap-2 hover:bg-emerald-800 active:scale-[0.98] transition-all disabled:opacity-50">
+                        <Check size={16}/> Guardar Cambios
+                      </button>
+                      <button type="button" onClick={cancelEdit} className="w-full bg-white border border-[#059669] text-[#059669] py-3 rounded-xl font-bold uppercase tracking-widest text-xs flex items-center justify-center gap-2 hover:bg-[#F0FDF4] active:scale-[0.98] transition-all">
+                        <X size={16}/> Cancelar
+                      </button>
+                    </div>
+                  ) : (
+                    <button type="submit" disabled={!itemName || weight==='' || hours===''} className="mt-2 w-full bg-[#059669] text-white py-3 rounded-xl font-bold uppercase tracking-widest text-xs flex items-center justify-center gap-2 hover:bg-emerald-800 active:scale-[0.98] transition-all disabled:opacity-50 disabled:active:scale-100 shadow-md">
+                      <Plus size={16}/> Añadir al Ticket
+                    </button>
+                  )}
                 </form>
 
                 {/* Accesorios / Hardware */}
@@ -356,9 +413,20 @@ function MainApp({ user }: { user: any }) {
                     <input type="number" min="0" step="1" value={hwPrice} onChange={e=>setHwPrice(Number(e.target.value))} placeholder="$ 0.00" className="bg-white border border-[#A7F3D0] rounded-lg p-2 text-sm font-bold text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#059669]" />
                   </div>
                   
-                  <button type="submit" disabled={!hwName || hwPrice===''} className="w-full bg-white border-2 border-[#059669] text-emerald-800 py-2 rounded-xl font-bold uppercase tracking-widest text-xs flex items-center justify-center gap-2 hover:bg-[#D1FAE5] active:scale-[0.98] transition-all disabled:opacity-50">
-                    <Plus size={16}/> Añadir Insumo
-                  </button>
+                  {editItemId && ticketItems.find(i => i.id === editItemId)?.itemType === 'hardware' ? (
+                    <div className="grid grid-cols-2 gap-2 mt-2">
+                       <button type="submit" disabled={!hwName || hwPrice===''} className="w-full bg-[#059669] text-white py-2 rounded-xl font-bold uppercase tracking-widest text-xs flex items-center justify-center gap-2 hover:bg-emerald-800 active:scale-[0.98] transition-all disabled:opacity-50">
+                          <Check size={16}/> Guardar Cambios
+                       </button>
+                       <button type="button" onClick={cancelEdit} className="w-full bg-white border border-[#059669] text-[#059669] py-2 rounded-xl font-bold uppercase tracking-widest text-xs flex items-center justify-center gap-2 hover:bg-[#F0FDF4] active:scale-[0.98] transition-all">
+                          <X size={16}/> Cancelar
+                       </button>
+                    </div>
+                  ) : (
+                    <button type="submit" disabled={!hwName || hwPrice===''} className="w-full bg-white border-2 border-[#059669] text-emerald-800 py-2 rounded-xl font-bold uppercase tracking-widest text-xs flex items-center justify-center gap-2 hover:bg-[#D1FAE5] active:scale-[0.98] transition-all disabled:opacity-50">
+                      <Plus size={16}/> Añadir Insumo
+                    </button>
+                  )}
                 </form>
 
              </div>
@@ -389,12 +457,15 @@ function MainApp({ user }: { user: any }) {
                                  </span>
                               </div>
 
-                              <div className="flex items-center gap-4 lg:gap-6">
-                                 <div className="text-right flex flex-col">
+                              <div className="flex items-center gap-2 lg:gap-4">
+                                 <div className="text-right flex flex-col mr-2">
                                    <span className="text-[9px] uppercase font-mono text-[#064e3b] opacity-50">Precio Final</span>
                                    <span className="font-black text-lg text-emerald-800">{formatMXN(item.totalPrice)}</span>
                                  </div>
-                                 <button onClick={() => setTicketItems(ticketItems.filter((_, idx)=>idx!==i))} className="text-red-400 opacity-20 group-hover:opacity-100 p-2 hover:bg-red-50 rounded transition-all">
+                                 <button onClick={() => handleEditItemInfo(item)} className="text-emerald-600 opacity-20 group-hover:opacity-100 p-2 hover:bg-emerald-50 rounded transition-all" title="Editar">
+                                   <Settings size={16} />
+                                 </button>
+                                 <button onClick={() => setTicketItems(ticketItems.filter((_, idx)=>idx!==i))} className="text-red-400 opacity-20 group-hover:opacity-100 p-2 hover:bg-red-50 rounded transition-all" title="Eliminar">
                                    <Trash2 size={16} />
                                  </button>
                               </div>
@@ -481,27 +552,5 @@ function MainApp({ user }: { user: any }) {
 }
 
 export default function App() {
-  const [user, setUser] = useState<any>(null);
-  useEffect(() => {
-    return auth.onAuthStateChanged((u) => setUser(u));
-  }, []);
-
-  if (!user) {
-    return (
-      <div className="min-h-screen bg-[#F0FDF4] flex flex-col items-center justify-center p-4">
-        <div className="bg-white p-8 rounded-3xl shadow-xl max-w-sm w-full text-center border-t-4 border-[#059669]">
-          <div className="flex justify-center mb-6">
-            <div className="bg-[#ECFDF5] text-emerald-800 p-4 rounded-2xl"><Target size={48} /></div>
-          </div>
-          <h1 className="text-3xl font-black text-gray-900 mb-2 tracking-tight">CubeUp³</h1>
-          <p className="text-sm text-emerald-800 mb-8 font-mono uppercase tracking-wider font-bold">SO de Manufactura</p>
-          <button onClick={() => signInWithPopup(auth, provider)} className="w-full bg-[#059669] text-white font-bold py-3 px-6 rounded-xl shadow-lg hover:bg-[#064E3B] transform active:scale-95 transition-all text-sm tracking-wider flex justify-center items-center gap-3">
-             <User size={18}/> Iniciar Sesión con Google
-          </button>
-        </div>
-      </div>
-    );
-  }
-
-  return <MainApp user={user} />;
+  return <MainApp />;
 }
