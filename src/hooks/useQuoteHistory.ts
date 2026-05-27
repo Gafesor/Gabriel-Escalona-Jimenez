@@ -18,11 +18,12 @@ export interface TicketItem {
   profileName: string;
   weightInfo: number;
   timeInfo: number;
-  unitPrice: number;
-  totalPrice: number;
+  unitCost: number;     // For investment tracking
+  totalCost: number;    // For investment tracking
+  unitPrice: number;    // For sale price
+  totalPrice: number;   // For sale price
   itemType?: 'print' | 'hardware';
   profileId?: string;
-  marginInfo?: number;
   laborInfo?: number;
 }
 
@@ -42,6 +43,7 @@ export interface Quote {
   operatorName: string;
   status: QuoteStatus;
   total: number;
+  globalMargin?: number;
   items: TicketItem[];
   createdAt: string;
   updatedAt: string;
@@ -80,7 +82,7 @@ export const useQuoteHistory = () => {
     return 'CUB-' + counter.toString().padStart(5, '0');
   }, []);
 
-  const saveQuoteSafe = useCallback(async (items: TicketItem[], operatorName: string, clientName: string, notes: string, existingId?: string): Promise<Quote> => {
+  const saveQuoteSafe = useCallback(async (items: TicketItem[], operatorName: string, clientName: string, notes: string, globalMargin: number, existingId?: string): Promise<Quote> => {
     const total = items.reduce((acc, it) => acc + it.totalPrice, 0);
     const now = new Date().toISOString();
     
@@ -94,11 +96,12 @@ export const useQuoteHistory = () => {
           clientName,
           notes,
           total,
+          globalMargin,
           updatedAt: now
         };
         try {
           await updateDoc(doc(db, 'quotes', existingId), {
-             items, operatorName, clientName, notes, total, updatedAt: now
+             items, operatorName, clientName, notes, total, globalMargin, updatedAt: now
           });
         } catch(e) {
           handleFirestoreError(e, OperationType.UPDATE, `quotes/${existingId}`);
@@ -116,6 +119,7 @@ export const useQuoteHistory = () => {
       operatorName,
       status: 'borrador',
       total,
+      globalMargin,
       items,
       createdAt: now,
       updatedAt: now,
@@ -210,6 +214,7 @@ export const useQuoteHistory = () => {
       operatorName: original.operatorName,
       status: 'borrador',
       total: original.total,
+      globalMargin: original.globalMargin || 0,
       items: original.items,
       createdAt: now,
       updatedAt: now,

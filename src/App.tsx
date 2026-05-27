@@ -15,10 +15,10 @@ const PRESET_OPERATORS = [
 ];
 
 const DEFAULT_PROFILES = [
-  { id: 'pla', name: 'PLA Estándar', materialCost: 0.5, machineHour: 15, defaultMargin: 30 },
-  { id: 'petg', name: 'PETG Industrial', materialCost: 0.8, machineHour: 20, defaultMargin: 40 },
-  { id: 'abs', name: 'ABS / ASA', materialCost: 1.0, machineHour: 30, defaultMargin: 45 },
-  { id: 'tpu', name: 'TPU Flexible', materialCost: 1.2, machineHour: 25, defaultMargin: 50 },
+  { id: 'pla', name: 'PLA Estándar', spoolCost: 500, machineHour: 15 },
+  { id: 'petg', name: 'PETG Industrial', spoolCost: 800, machineHour: 20 },
+  { id: 'abs', name: 'ABS / ASA', spoolCost: 1000, machineHour: 30 },
+  { id: 'tpu', name: 'TPU Flexible', spoolCost: 1200, machineHour: 25 },
 ];
 
 export const formatMXN = (val: number) => new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN' }).format(val);
@@ -44,26 +44,64 @@ function MainApp() {
   // Custom profiles
   const [profiles, setProfiles] = useState<any[]>(() => {
     const saved = localStorage.getItem('cubeup3-custom-profiles');
-    if (saved) return JSON.parse(saved);
+    if (saved) {
+       const parsed = JSON.parse(saved);
+       return parsed.map((p: any) => ({
+         ...p,
+         spoolCost: p.spoolCost !== undefined ? p.spoolCost : (p.materialCost ? p.materialCost * 1000 : 500),
+         machineHour: p.machineHour !== undefined ? p.machineHour : 15
+       }));
+    }
     return DEFAULT_PROFILES;
   });
   const [isEditingProfiles, setIsEditingProfiles] = useState(false);
-  const [newProfileInput, setNewProfileInput] = useState({ name: '', materialCost: '', machineHour: '', defaultMargin: '' });
+  const [newProfileInput, setNewProfileInput] = useState({ name: '', spoolCost: '', machineHour: '' });
+  
+  const [profileEditingId, setProfileEditingId] = useState<string | null>(null);
+  const [editProfileInput, setEditProfileInput] = useState({ name: '', spoolCost: '', machineHour: '' });
+
+  const startEditProfile = (p: any) => {
+    setProfileEditingId(p.id);
+    setEditProfileInput({
+      name: p.name,
+      spoolCost: p.spoolCost.toString(),
+      machineHour: p.machineHour.toString()
+    });
+  };
+
+  const handleUpdateProfile = () => {
+    if (!editProfileInput.name.trim() || !editProfileInput.spoolCost || !editProfileInput.machineHour) return;
+    
+    const updated = profiles.map(p => {
+      if (p.id === profileEditingId) {
+        return {
+          ...p,
+          name: editProfileInput.name.trim(),
+          spoolCost: Number(editProfileInput.spoolCost),
+          machineHour: Number(editProfileInput.machineHour),
+        };
+      }
+      return p;
+    });
+    
+    setProfiles(updated);
+    localStorage.setItem('cubeup3-custom-profiles', JSON.stringify(updated));
+    setProfileEditingId(null);
+  };
 
   const handleAddProfile = () => {
-    if (!newProfileInput.name.trim() || !newProfileInput.materialCost || !newProfileInput.machineHour || !newProfileInput.defaultMargin) return;
+    if (!newProfileInput.name.trim() || !newProfileInput.spoolCost || !newProfileInput.machineHour) return;
     const p = {
       id: Math.random().toString(),
       name: newProfileInput.name.trim(),
-      materialCost: Number(newProfileInput.materialCost),
+      spoolCost: Number(newProfileInput.spoolCost),
       machineHour: Number(newProfileInput.machineHour),
-      defaultMargin: Number(newProfileInput.defaultMargin),
     };
     const updated = [...profiles, p];
     setProfiles(updated);
     localStorage.setItem('cubeup3-custom-profiles', JSON.stringify(updated));
     setProfileId(p.id);
-    setNewProfileInput({ name: '', materialCost: '', machineHour: '', defaultMargin: '' });
+    setNewProfileInput({ name: '', spoolCost: '', machineHour: '' });
   };
 
   const handleRemoveProfile = (idStr: string) => {
@@ -95,20 +133,49 @@ function MainApp() {
   const [itemName, setItemName] = useState('');
   const [profileId, setProfileId] = useState(() => {
     const saved = localStorage.getItem('cubeup3-custom-profiles');
-    if (saved) return JSON.parse(saved)[0].id;
-    return DEFAULT_PROFILES[0].id;
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      if (parsed.length > 0) return parsed[0].id;
+    }
+    return 'pla';
   });
   const [weight, setWeight] = useState<number | ''>('');
   const [hours, setHours] = useState<number | ''>('');
-  const [pieceMargin, setPieceMargin] = useState<number | ''>('');
   const [pieceLabor, setPieceLabor] = useState<number | ''>('');
+  
+  // Global attributes
+  const [globalMargin, setGlobalMargin] = useState<number>(30);
   
   // Hardware form
   const [hwName, setHwName] = useState('');
   const [hwPrice, setHwPrice] = useState<number | ''>('');
   const [editItemId, setEditItemId] = useState<string | null>(null);
 
+  const livePiecePrice = useMemo(() => {
+    if (weight === '' && hours === '') return 0;
+    const profile = profiles.find(p => p.id === profileId);
+    if (!profile) return 0;
+    
+    const w = Number(weight) || 0;
+    const h = Number(hours) || 0;
+    const materialCost = (w / 1000) * (profile.spoolCost || 500);
+    const machineCost = h * profile.machineHour;
+    const labor = Number(pieceLabor) || 0;
+    
+    const base = materialCost + machineCost + labor;
+    return base * (1 + (globalMargin / 100));
+  }, [weight, hours, pieceLabor, profileId, profiles, globalMargin]);
+
   const { saveQuote, quotes } = useQuoteHistory();
+
+  // Re-calculate prices whenever global margin changes
+  useEffect(() => {
+    setTicketItems(prev => prev.map(item => ({
+      ...item,
+      unitPrice: item.unitCost * (1 + globalMargin / 100),
+      totalPrice: (item.unitCost * item.quantity) * (1 + globalMargin / 100)
+    })));
+  }, [globalMargin]);
 
   // Real-time autosave for drafts (debounced 1.5s)
   useEffect(() => {
@@ -117,10 +184,10 @@ function MainApp() {
     if (currentQuote && currentQuote.status !== 'borrador') return;
 
     const timeoutMsg = setTimeout(() => {
-       saveQuote(ticketItems, operatorName, clientName, currentQuote?.notes || '', savedQuoteId).catch(console.error);
+       saveQuote(ticketItems, operatorName, clientName, currentQuote?.notes || '', globalMargin, savedQuoteId).catch(console.error);
     }, 1500);
     return () => clearTimeout(timeoutMsg);
-  }, [ticketItems, operatorName, clientName, savedQuoteId, saveQuote, quotes]);
+  }, [ticketItems, operatorName, clientName, globalMargin, savedQuoteId, saveQuote, quotes]);
 
   const handleAddPiece = (e: React.FormEvent) => {
     e.preventDefault();
@@ -129,13 +196,12 @@ function MainApp() {
     
     const w = Number(weight);
     const h = Number(hours);
-    const materialCost = w * profile.materialCost;
+    const materialCost = (w / 1000) * (profile.spoolCost || 500);
     const machineCost = h * profile.machineHour;
     const labor = Number(pieceLabor) || 0;
-    const margin = pieceMargin !== '' ? Number(pieceMargin) : profile.defaultMargin;
     
-    const base = materialCost + machineCost + labor;
-    const withMargin = base * (1 + (margin / 100));
+    const unitCost = materialCost + machineCost + labor;
+    const unitPrice = unitCost * (1 + globalMargin / 100);
 
     const newItem = {
       id: editItemId || Math.random().toString(),
@@ -144,11 +210,12 @@ function MainApp() {
       profileName: profile.name,
       weightInfo: w,
       timeInfo: h,
-      unitPrice: withMargin,
-      totalPrice: withMargin,
+      unitCost: unitCost,
+      totalCost: unitCost,
+      unitPrice: unitPrice,
+      totalPrice: unitPrice,
       itemType: 'print' as const,
       profileId: profile.id,
-      marginInfo: margin,
       laborInfo: labor
     };
 
@@ -162,14 +229,14 @@ function MainApp() {
     setItemName('');
     setWeight('');
     setHours('');
-    setPieceMargin('');
     setPieceLabor('');
   };
 
   const handleAddHardware = (e: React.FormEvent) => {
     e.preventDefault();
     if (!hwName || hwPrice === '') return;
-    const price = Number(hwPrice);
+    const cost = Number(hwPrice);
+    const price = cost * (1 + globalMargin / 100);
     const newItem = {
       id: editItemId || Math.random().toString(),
       itemName: hwName,
@@ -177,6 +244,8 @@ function MainApp() {
       profileName: 'Hardware Adicional',
       weightInfo: 0,
       timeInfo: 0,
+      unitCost: cost,
+      totalCost: cost,
       unitPrice: price,
       totalPrice: price,
       itemType: 'hardware' as const
@@ -197,7 +266,6 @@ function MainApp() {
     setItemName('');
     setWeight('');
     setHours('');
-    setPieceMargin('');
     setPieceLabor('');
     setHwName('');
     setHwPrice('');
@@ -207,7 +275,7 @@ function MainApp() {
     setEditItemId(item.id);
     if (item.itemType === 'hardware') {
       setHwName(item.itemName);
-      setHwPrice(item.unitPrice.toString() as any);
+      setHwPrice(item.unitCost.toString() as any);
       // scroll to hardware form
     } else {
       setItemName(item.itemName);
@@ -216,8 +284,6 @@ function MainApp() {
       }
       setWeight(item.weightInfo.toString() as any);
       setHours(item.timeInfo.toString() as any);
-      if (item.marginInfo !== undefined) setPieceMargin(item.marginInfo.toString() as any);
-      else setPieceMargin('');
       if (item.laborInfo !== undefined) setPieceLabor(item.laborInfo.toString() as any);
       else setPieceLabor('');
     }
@@ -241,7 +307,9 @@ function MainApp() {
     setCurrentTab('calculator');
   };
 
-  const lgTotals = ticketItems.reduce((acc, i) => acc + i.totalPrice, 0);
+  const lgTotals = ticketItems.reduce((acc, i) => acc + (i.totalPrice || 0), 0);
+  const lgCosts = ticketItems.reduce((acc, i) => acc + (i.totalCost || 0), 0);
+  const lgProfit = lgTotals - lgCosts;
 
   return (
     <div className="min-h-screen bg-[#F0FDF4] flex flex-col font-sans text-stone-900 border-t-4 border-[#065F46]">
@@ -372,7 +440,7 @@ function MainApp() {
                     </div>
                   </div>
                   
-                  <div className="grid grid-cols-3 gap-3">
+                  <div className="grid grid-cols-2 gap-3">
                     <div className="flex flex-col gap-1">
                       <label className="text-[10px] uppercase font-mono text-emerald-800 font-bold leading-tight" title="Tiempo Operativo Máquina (Horas)">T. Máquina (H)</label>
                       <input type="number" min="0" step="0.1" value={hours} onChange={e=>setHours(Number(e.target.value))} placeholder="Ej. 5.5" className="w-full bg-[#F0FDF4] border border-[#059669] rounded-lg p-2 text-sm font-bold text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#059669]" />
@@ -381,10 +449,11 @@ function MainApp() {
                       <label className="text-[10px] uppercase font-mono text-emerald-800 font-bold leading-tight" title="Mano de obra o costos fijos para esta pieza">Mano de obra ($)</label>
                       <input type="number" min="0" step="1" value={pieceLabor} onChange={e=>setPieceLabor(Number(e.target.value))} placeholder="Ej. 50" className="w-full bg-[#F0FDF4] border border-[#059669] rounded-lg p-2 text-sm font-bold text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#059669]" />
                     </div>
-                    <div className="flex flex-col gap-1">
-                      <label className="text-[10px] uppercase font-mono text-emerald-800 font-bold leading-tight" title={`Margen de ganancia, por defecto ${profiles.find(p=>p.id===profileId)?.defaultMargin}%`}>Margen (%)</label>
-                      <input type="number" min="0" step="1" value={pieceMargin} onChange={e=>setPieceMargin(Number(e.target.value))} placeholder={`Perfil: ${profiles.find(p=>p.id===profileId)?.defaultMargin}%`} className="w-full bg-[#F0FDF4] border border-[#059669] rounded-lg p-2 text-sm font-bold text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#059669]" />
-                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-between text-xs font-bold text-emerald-800 bg-emerald-50 px-3 py-2 rounded-lg border border-[#A7F3D0] mt-1 shadow-sm">
+                    <span className="uppercase tracking-widest font-mono text-[9px] opacity-70">Costo Base</span>
+                    <span className="font-mono text-base">{livePiecePrice > 0 ? formatMXN(livePiecePrice / (1 + globalMargin / 100)) : '$ 0.00'}</span>
                   </div>
 
                   {editItemId && ticketItems.find(i => i.id === editItemId)?.itemType !== 'hardware' ? (
@@ -411,6 +480,11 @@ function MainApp() {
                   <div className="grid grid-cols-3 gap-3">
                     <input type="text" value={hwName} onChange={e=>setHwName(e.target.value)} placeholder="Tornillos M3..." className="col-span-2 bg-white border border-[#A7F3D0] rounded-lg p-2 text-sm font-bold text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#059669]" />
                     <input type="number" min="0" step="1" value={hwPrice} onChange={e=>setHwPrice(Number(e.target.value))} placeholder="$ 0.00" className="bg-white border border-[#A7F3D0] rounded-lg p-2 text-sm font-bold text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#059669]" />
+                  </div>
+
+                  <div className="flex items-center justify-between text-xs font-bold text-emerald-800 bg-emerald-50 px-3 py-2 rounded-lg border border-[#A7F3D0] mt-1 shadow-sm">
+                    <span className="uppercase tracking-widest font-mono text-[9px] opacity-70">Precio Insumo</span>
+                    <span className="font-mono text-base">{Number(hwPrice) > 0 ? formatMXN(Number(hwPrice)) : '$ 0.00'}</span>
                   </div>
                   
                   {editItemId && ticketItems.find(i => i.id === editItemId)?.itemType === 'hardware' ? (
@@ -476,8 +550,26 @@ function MainApp() {
                 </div>
 
                 <div className="shrink-0 p-4 lg:p-6 bg-white border-t border-[#A7F3D0]">
+                   
+                   <div className="flex flex-col gap-2 mb-6">
+                     <div className="flex justify-between items-center bg-gray-50 p-2 px-3 rounded-lg border border-gray-100">
+                       <span className="uppercase font-mono text-[10px] font-bold text-gray-500 tracking-widest">Inversión (Costo Base)</span>
+                       <span className="font-mono text-sm font-bold text-gray-800">{formatMXN(lgCosts)}</span>
+                     </div>
+                     <div className="flex justify-between items-center bg-emerald-50 p-2 px-3 rounded-lg border border-[#A7F3D0]">
+                       <div className="flex items-center gap-2">
+                         <span className="uppercase font-mono text-[10px] font-bold text-emerald-800 tracking-widest opacity-80">Margen Global</span>
+                         <div className="flex items-center bg-white border border-[#34D399] rounded px-1">
+                           <input type="number" min="0" step="1" value={globalMargin} onChange={e=>setGlobalMargin(Number(e.target.value))} className="w-12 text-center text-xs font-bold text-emerald-900 focus:outline-none" />
+                           <span className="text-xs text-emerald-800 font-bold">%</span>
+                         </div>
+                       </div>
+                       <span className="font-mono text-sm font-bold text-emerald-700">+{formatMXN(lgProfit)}</span>
+                     </div>
+                   </div>
+
                    <div className="flex justify-between items-end mb-4">
-                     <span className="uppercase font-mono text-xs font-bold text-[#064e3b] opacity-50 tracking-widest">Inversión Final</span>
+                     <span className="uppercase font-mono text-xs font-bold text-[#064e3b] opacity-50 tracking-widest">Precio de Venta</span>
                      <span className="text-3xl lg:text-5xl font-black text-[#064e3b] tracking-tighter">{formatMXN(lgTotals)}</span>
                    </div>
                    
@@ -507,14 +599,47 @@ function MainApp() {
                 <span className="text-xs font-bold text-gray-800 uppercase tracking-widest opacity-60">Perfiles Registrados</span>
                 <div className="flex flex-col gap-2">
                   {profiles.map(p => (
-                    <div key={p.id} className="flex justify-between items-center text-sm font-bold text-gray-700 bg-gray-50 border border-gray-200 p-3 rounded-xl shadow-sm hover:border-[#A7F3D0] transition-colors">
-                      <div className="flex flex-col">
-                        <span className="text-gray-900">{p.name}</span>
-                        <span className="text-[10px] font-mono font-normal opacity-70 mt-1">
-                           ${p.materialCost}/g | ${p.machineHour}/h | {p.defaultMargin}% mg
-                        </span>
-                      </div>
-                      <button type="button" onClick={() => handleRemoveProfile(p.id)} className="text-red-500 bg-red-50 p-2 rounded opacity-80 hover:opacity-100 transition-opacity"><Trash2 size={16}/></button>
+                    <div key={p.id} className={`flex flex-col gap-2 ${profileEditingId === p.id ? 'bg-[#ECFDF5] border-[#059669]' : 'bg-gray-50 border-gray-200'} border p-3 rounded-xl shadow-sm hover:border-[#A7F3D0] transition-colors`}>
+                      {profileEditingId === p.id ? (
+                        <div className="flex flex-col gap-3">
+                           <input type="text" value={editProfileInput.name} onChange={e => setEditProfileInput({...editProfileInput, name: e.target.value})} placeholder="Nombre" className="bg-white border border-[#A7F3D0] rounded p-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#059669] font-bold text-gray-900" />
+                           <div className="grid grid-cols-3 gap-2">
+                             <div className="flex flex-col gap-1">
+                               <label className="text-[9px] uppercase font-bold text-emerald-800">Material (g)</label>
+                               <input type="number" step="0.01" value={editProfileInput.materialCost} onChange={e => setEditProfileInput({...editProfileInput, materialCost: e.target.value})} className="bg-white border border-[#A7F3D0] rounded p-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#059669]" />
+                             </div>
+                             <div className="flex flex-col gap-1">
+                               <label className="text-[9px] uppercase font-bold text-emerald-800">Máquina (h)</label>
+                               <input type="number" step="0.1" value={editProfileInput.machineHour} onChange={e => setEditProfileInput({...editProfileInput, machineHour: e.target.value})} className="bg-white border border-[#A7F3D0] rounded p-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#059669]" />
+                             </div>
+                             <div className="flex flex-col gap-1">
+                               <label className="text-[9px] uppercase font-bold text-emerald-800">Margen (%)</label>
+                               <input type="number" step="1" value={editProfileInput.defaultMargin} onChange={e => setEditProfileInput({...editProfileInput, defaultMargin: e.target.value})} className="bg-white border border-[#A7F3D0] rounded p-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#059669]" />
+                             </div>
+                           </div>
+                           <div className="flex items-center gap-2 mt-1">
+                              <button type="button" onClick={handleUpdateProfile} className="flex-1 bg-[#059669] text-white p-2 text-xs rounded-lg uppercase font-bold hover:bg-emerald-800 transition-colors flex justify-center items-center gap-2">
+                                <Check size={14} /> Guardar
+                              </button>
+                              <button type="button" onClick={() => setProfileEditingId(null)} className="flex-1 bg-white border border-[#059669] text-emerald-800 p-2 text-xs rounded-lg uppercase font-bold hover:bg-[#F0FDF4] transition-colors flex justify-center items-center gap-2">
+                                <X size={14} /> Cancelar
+                              </button>
+                           </div>
+                        </div>
+                      ) : (
+                        <div className="flex justify-between items-center">
+                          <div className="flex flex-col">
+                            <span className="text-sm font-bold text-gray-900">{p.name}</span>
+                            <span className="text-[10px] font-mono font-normal opacity-70 mt-1">
+                               ${p.spoolCost}/kg | ${p.machineHour}/h
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <button type="button" onClick={() => startEditProfile(p)} className="text-emerald-600 bg-emerald-50 p-2 rounded opacity-80 hover:opacity-100 transition-opacity" title="Editar"><Settings size={16}/></button>
+                            <button type="button" onClick={() => handleRemoveProfile(p.id)} className="text-red-500 bg-red-50 p-2 rounded opacity-80 hover:opacity-100 transition-opacity" title="Eliminar"><Trash2 size={16}/></button>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>
