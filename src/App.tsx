@@ -19,10 +19,11 @@ import {
   MessageSquare,
   Minus
 } from 'lucide-react';
-import { useQuoteHistory, TicketItem, Quote } from './hooks/useQuoteHistory';
+import { useQuoteHistory, TicketItem, Quote, QuoteNotFoundError } from './hooks/useQuoteHistory';
 import { QuoteHistory } from './components/QuoteHistory';
 import { MessagePresetsModal } from './components/MessagePresetsModal';
 import { exportQuoteToPDF } from './lib/pdfHelper';
+import { useToast } from './hooks/useToast';
 
 interface Profile {
   id: string;
@@ -58,9 +59,19 @@ export function App() {
   const [ticketItems, setTicketItems] = useState<TicketItem[]>([]);
   const [savedQuoteId, setSavedQuoteId] = useState<string | null>(null);
   const [showPresetsModal, setShowPresetsModal] = useState(false);
+  const [isSavingDraft, setIsSavingDraft] = useState(false);
 
-  // Autosave reference to prevent infinite loops
+  const { warning, success, error } = useToast();
+
+  // Autosave references to avoid infinite loops, stale closures and StrictMode duplicate saves
   const lastSavedStateRef = useRef<string>('');
+  const savedQuoteIdRef = useRef<string | null>(null);
+  const isSavingRef = useRef<boolean>(false);
+  const inFlightSignatureRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    savedQuoteIdRef.current = savedQuoteId;
+  }, [savedQuoteId]);
 
   // Operator Profiles
   const [presetOperators, setPresetOperators] = useState<string[]>(() => {
@@ -171,6 +182,10 @@ export function App() {
   }, [weight, hours, pieceLabor, profileId, profiles, globalMargin]);
 
   const { saveQuote, quotes } = useQuoteHistory();
+  const saveQuoteRef = useRef(saveQuote);
+  useEffect(() => {
+    saveQuoteRef.current = saveQuote;
+  }, [saveQuote]);
 
   // Re-calculate prices whenever global margin changes
   useEffect(() => {
@@ -181,7 +196,7 @@ export function App() {
     })));
   }, [globalMargin]);
 
-  // Real-time autosave (debounced 1.5s) with dirtiness protection
+  // Real-time autosave (debounced 1.5s) with dirtiness protection, idempotency and StrictMode handling
   useEffect(() => {
     if (ticketItems.length === 0) return;
 
@@ -192,35 +207,55 @@ export function App() {
       globalMargin
     });
 
-    if (currentStateStr === lastSavedStateRef.current) return;
-
-    if (savedQuoteId) {
-      const currentQuote = quotes.find(q => q.id === savedQuoteId);
-      if (currentQuote && currentQuote.status !== 'borrador') return;
+    // BUG 6: Si no hay cambios o ya está en vuelo una petición con exactamente la misma firma, descartar
+    if (currentStateStr === lastSavedStateRef.current || currentStateStr === inFlightSignatureRef.current) {
+      return;
     }
 
     const timeoutMsg = setTimeout(async () => {
+      if (isSavingRef.current || currentStateStr === lastSavedStateRef.current || currentStateStr === inFlightSignatureRef.current) {
+        return;
+      }
+      isSavingRef.current = true;
+      inFlightSignatureRef.current = currentStateStr;
+      setIsSavingDraft(true);
+
       try {
-        const currentQuote = savedQuoteId ? quotes.find(q => q.id === savedQuoteId) : null;
-        const q = await saveQuote(
+        const currentTargetId = savedQuoteIdRef.current;
+        const q = await saveQuoteRef.current(
           ticketItems, 
           operatorName, 
           clientName, 
-          currentQuote?.notes || '', 
+          '', 
           globalMargin, 
-          savedQuoteId || undefined
+          currentTargetId || undefined
         );
+        
         lastSavedStateRef.current = currentStateStr;
-        if (!savedQuoteId && q?.id) {
+        // BUG 2: Asigna siempre cuando el guardado devuelva un id distinto al actual
+        if (q?.id && q.id !== savedQuoteIdRef.current) {
           setSavedQuoteId(q.id);
+          savedQuoteIdRef.current = q.id;
         }
-      } catch (e) {
-        console.error("Autosave falló:", e);
+      } catch (err: unknown) {
+        // BUG 2: Si saveQuote lanza 'QUOTE_NOT_FOUND', limpiar savedQuoteId, mostrar toast y no escribir en ese ciclo
+        if (err instanceof QuoteNotFoundError || (err instanceof Error && 'code' in err && (err as { code: string }).code === 'QUOTE_NOT_FOUND')) {
+          setSavedQuoteId(null);
+          savedQuoteIdRef.current = null;
+          lastSavedStateRef.current = '';
+          warning("El borrador ya no existe; se creará uno nuevo al siguiente cambio");
+          return;
+        }
+        console.error("Autosave falló:", err);
+      } finally {
+        inFlightSignatureRef.current = null;
+        isSavingRef.current = false;
+        setIsSavingDraft(false);
       }
     }, 1500);
 
     return () => clearTimeout(timeoutMsg);
-  }, [ticketItems, operatorName, clientName, globalMargin, savedQuoteId, saveQuote, quotes]);
+  }, [ticketItems, operatorName, clientName, globalMargin, warning]);
 
   const handleGenerateLocalPDF = () => {
     if (ticketItems.length === 0) return;
@@ -379,27 +414,54 @@ export function App() {
     if (item.itemType === 'hardware') {
       setHwName(item.itemName);
       setHwQuantity(item.quantity || 1);
-      setHwPrice(item.unitCost.toString() as any);
+      setHwPrice(item.unitCost.toString() as unknown as number);
     } else {
       setItemName(item.itemName);
       setItemQuantity(item.quantity || 1);
       if (item.profileId && profiles.some(p => p.id === item.profileId)) {
         setProfileId(item.profileId);
       }
-      setWeight(item.weightInfo.toString() as any);
-      setHours(item.timeInfo.toString() as any);
-      if (item.laborInfo !== undefined) setPieceLabor(item.laborInfo.toString() as any);
+      setWeight(item.weightInfo.toString() as unknown as number);
+      setHours(item.timeInfo.toString() as unknown as number);
+      if (item.laborInfo !== undefined) setPieceLabor(item.laborInfo.toString() as unknown as number);
       else setPieceLabor('');
     }
   };
 
   const handleSave = async () => {
-    if (ticketItems.length === 0) return;
+    if (ticketItems.length === 0 || isSavingRef.current) return;
+    isSavingRef.current = true;
+    setIsSavingDraft(true);
+    const currentStateStr = JSON.stringify({
+      ticketItems,
+      operatorName: operatorName.trim(),
+      clientName: clientName.trim(),
+      globalMargin
+    });
+    inFlightSignatureRef.current = currentStateStr;
+
     try {
       const q = await saveQuote(ticketItems, operatorName, clientName, '', globalMargin, savedQuoteId || undefined);
-      setSavedQuoteId(q.id);
-    } catch (e) {
-      console.error(e);
+      if (q?.id && q.id !== savedQuoteIdRef.current) {
+        setSavedQuoteId(q.id);
+        savedQuoteIdRef.current = q.id;
+      }
+      lastSavedStateRef.current = currentStateStr;
+      success("Cotización guardada exitosamente");
+    } catch (err: unknown) {
+      if (err instanceof QuoteNotFoundError || (err instanceof Error && 'code' in err && (err as { code: string }).code === 'QUOTE_NOT_FOUND')) {
+        setSavedQuoteId(null);
+        savedQuoteIdRef.current = null;
+        lastSavedStateRef.current = '';
+        warning("El borrador ya no existe; se creará uno nuevo al siguiente cambio");
+        return;
+      }
+      console.error(err);
+      error("Error al guardar la cotización");
+    } finally {
+      inFlightSignatureRef.current = null;
+      isSavingRef.current = false;
+      setIsSavingDraft(false);
     }
   };
 
@@ -412,6 +474,7 @@ export function App() {
     setOperatorName(quote.operatorName || '');
     setGlobalMargin(defaultMargin);
     setSavedQuoteId(quote.id);
+    savedQuoteIdRef.current = quote.id;
     
     lastSavedStateRef.current = JSON.stringify({
       ticketItems: quote.items,
@@ -423,9 +486,30 @@ export function App() {
     setActiveTab('calculator');
   };
 
+  const handleNewQuote = () => {
+    handleClear();
+    setActiveTab('calculator');
+  };
+
+  const handleCloneQuote = (cloned: Quote) => {
+    handleEditDraft(cloned);
+  };
+
+  const handlePrintQuote = (quote: Quote) => {
+    exportQuoteToPDF({
+      folio: quote.folio,
+      clientName: quote.clientName || 'Cliente',
+      operatorName: quote.operatorName || 'Asesor Técnico',
+      createdAt: new Date(quote.createdAt),
+      items: quote.items,
+      total: quote.total
+    });
+  };
+
   const handleClear = () => {
     setTicketItems([]);
     setSavedQuoteId(null);
+    savedQuoteIdRef.current = null;
     setClientName('');
     lastSavedStateRef.current = '';
   };
@@ -494,6 +578,9 @@ export function App() {
           <QuoteHistory 
             onEditDraft={handleEditDraft}
             onOpenPresetsModal={() => setShowPresetsModal(true)}
+            onNewQuote={handleNewQuote}
+            onCloneQuote={handleCloneQuote}
+            onPrint={handlePrintQuote}
           />
         ) : (
           <>
@@ -793,11 +880,15 @@ export function App() {
                         <RotateCcw size={12} /> Limpiar
                       </button>
                     )}
-                    {savedQuoteId && (
+                    {isSavingDraft ? (
+                      <span className="bg-yellow-400 text-yellow-950 text-[10px] font-bold px-2.5 py-0.5 rounded-full uppercase tracking-wider font-mono animate-pulse">
+                        Sincronizando...
+                      </span>
+                    ) : savedQuoteId ? (
                       <span className="bg-[#82C69E] text-[#1B4D3E] text-[10px] font-bold px-2.5 py-0.5 rounded-full uppercase tracking-wider font-mono">
                         Borrador Sincronizado
                       </span>
-                    )}
+                    ) : null}
                   </div>
                 </div>
 
@@ -941,10 +1032,10 @@ export function App() {
                   <div className="flex flex-col gap-3">
                     <button 
                       onClick={handleSave} 
-                      disabled={ticketItems.length === 0} 
+                      disabled={ticketItems.length === 0 || isSavingDraft} 
                       className="w-full bg-[#1B4D3E] text-white py-3 rounded-xl font-bold uppercase tracking-widest text-xs flex items-center justify-center gap-2 hover:bg-[#2E7D32] transition-colors disabled:opacity-40 cursor-pointer shadow-sm"
                     >
-                      <Save size={15}/> Guardar Cotización
+                      <Save size={15}/> {isSavingDraft ? 'Guardando...' : 'Guardar Cotización'}
                     </button>
 
                     <div className="p-3 bg-[#F7F5F0] rounded-xl border border-[#82C69E]/50 flex flex-wrap items-center justify-between gap-2">
@@ -1085,4 +1176,5 @@ export function App() {
     </div>
   );
 }
+
 export default App;

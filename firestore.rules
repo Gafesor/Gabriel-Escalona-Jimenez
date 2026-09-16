@@ -44,8 +44,8 @@ service cloud.firestore {
         && incoming().createdAt == existing().createdAt
         && incoming().folio == existing().folio;
 
-      // Prohibición estricta de borrado físico destructivo (se mantiene auditoría o borrado lógico)
-      allow delete: if false;
+      // Permitir borrado de borradores o cotizaciones archivadas para limpieza de taller
+      allow delete: if resource.data.status == 'borrador' || resource.data.isArchived == true;
     }
 
     // =========================================================================

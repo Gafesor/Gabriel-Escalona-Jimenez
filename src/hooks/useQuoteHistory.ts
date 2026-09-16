@@ -1,6 +1,16 @@
 import { useState, useCallback, useEffect } from 'react';
-import { db, handleFirestoreError, OperationType, auth } from '../lib/firebase';
-import { collection, doc, onSnapshot, setDoc, updateDoc, deleteDoc, query, where, orderBy, getDocs } from 'firebase/firestore';
+import { db, handleFirestoreError, OperationType } from '../lib/firebase';
+import { 
+  collection, 
+  doc, 
+  onSnapshot, 
+  setDoc, 
+  updateDoc, 
+  deleteDoc, 
+  query, 
+  getDoc,
+  runTransaction 
+} from 'firebase/firestore';
 
 export type QuoteStatus =
   | 'borrador'
@@ -18,10 +28,10 @@ export interface TicketItem {
   profileName: string;
   weightInfo: number;
   timeInfo: number;
-  unitCost: number;     // For investment tracking
-  totalCost: number;    // For investment tracking
-  unitPrice: number;    // For sale price
-  totalPrice: number;   // For sale price
+  unitCost: number;     // Inversión de taller
+  totalCost: number;    // Inversión de taller
+  unitPrice: number;    // Precio de venta
+  totalPrice: number;   // Precio de venta
   itemType?: 'print' | 'hardware';
   profileId?: string;
   laborInfo?: number;
@@ -52,6 +62,15 @@ export interface Quote {
   isArchived: boolean;
 }
 
+export class QuoteNotFoundError extends Error {
+  readonly code = 'QUOTE_NOT_FOUND' as const;
+
+  constructor(id: string) {
+    super(`No se encontró la cotización con id: ${id}`);
+    this.name = 'QuoteNotFoundError';
+  }
+}
+
 export const useQuoteHistory = () => {
   const [quotes, setQuotes] = useState<Quote[]>([]);
   const [loading, setLoading] = useState(true);
@@ -61,10 +80,9 @@ export const useQuoteHistory = () => {
     
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const fetchedQuotes: Quote[] = [];
-      snapshot.forEach(doc => {
-        fetchedQuotes.push(doc.data() as Quote);
+      snapshot.forEach(docSnap => {
+        fetchedQuotes.push(docSnap.data() as Quote);
       });
-      // Sort in memory by descending date
       fetchedQuotes.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
       setQuotes(fetchedQuotes);
       setLoading(false);
@@ -75,46 +93,82 @@ export const useQuoteHistory = () => {
     return () => unsubscribe();
   }, []);
 
-  const getNextFolio = useCallback(() => {
-    let counter = parseInt(localStorage.getItem('cubeup3-folio-counter') || '0', 10);
-    counter += 1;
-    localStorage.setItem('cubeup3-folio-counter', counter.toString());
-    return 'CUB-' + counter.toString().padStart(5, '0');
+  const getNextFolio = useCallback(async (): Promise<string> => {
+    const counterRef = doc(db, 'counters', 'folio');
+    const nextCounter = await runTransaction(db, async (transaction) => {
+      const counterDoc = await transaction.get(counterRef);
+      let currentVal = 0;
+      if (counterDoc.exists()) {
+        const data = counterDoc.data();
+        if (typeof data.current === 'number' && Number.isFinite(data.current)) {
+          currentVal = Math.floor(data.current);
+        }
+      }
+      const nextVal = currentVal + 1;
+      transaction.set(counterRef, { current: nextVal }, { merge: true });
+      return nextVal;
+    });
+
+    const year = new Date().getFullYear();
+    const sequencePadded = String(nextCounter).padStart(4, '0');
+    return `CUB-${year}-${sequencePadded}`;
   }, []);
 
-  const saveQuoteSafe = useCallback(async (items: TicketItem[], operatorName: string, clientName: string, notes: string, globalMargin: number, existingId?: string): Promise<Quote> => {
+  const saveQuoteSafe = useCallback(async (
+    items: TicketItem[], 
+    operatorName: string, 
+    clientName: string, 
+    notes: string, 
+    globalMargin: number, 
+    existingId?: string
+  ): Promise<Quote> => {
     const total = items.reduce((acc, it) => acc + it.totalPrice, 0);
     const now = new Date().toISOString();
     
     if (existingId) {
-      const existing = quotes.find(q => q.id === existingId);
-      if (existing) {
-        const updatedQuote: Quote = {
-          ...existing,
-          items,
-          operatorName,
-          clientName,
-          notes,
-          total,
-          globalMargin,
-          updatedAt: now
-        };
-        try {
-          await updateDoc(doc(db, 'quotes', existingId), {
-             items, operatorName, clientName, notes, total, globalMargin, updatedAt: now
-          });
-        } catch(e) {
-          handleFirestoreError(e, OperationType.UPDATE, `quotes/${existingId}`);
-        }
-        return updatedQuote;
+      const quoteDocRef = doc(db, 'quotes', existingId);
+      const snap = await getDoc(quoteDocRef);
+      
+      if (!snap.exists()) {
+        throw new QuoteNotFoundError(existingId);
       }
+
+      const existingData = snap.data() as Quote;
+      const updatedQuote: Quote = {
+        ...existingData,
+        items,
+        operatorName,
+        clientName,
+        notes,
+        total,
+        globalMargin,
+        updatedAt: now
+      };
+
+      try {
+        await updateDoc(quoteDocRef, {
+          items, 
+          operatorName, 
+          clientName, 
+          notes, 
+          total, 
+          globalMargin, 
+          updatedAt: now
+        });
+      } catch (e) {
+        handleFirestoreError(e, OperationType.UPDATE, `quotes/${existingId}`);
+      }
+
+      return updatedQuote;
     }
     
+    // Solo crea documento nuevo cuando existingId venga undefined
+    const folio = await getNextFolio();
     const newId = Date.now().toString() + Math.random().toString(36).substring(2, 9);
     const finalQuote: Quote = {
       id: newId,
       ownerId: "public",
-      folio: getNextFolio(),
+      folio,
       clientName,
       operatorName,
       status: 'borrador',
@@ -130,91 +184,116 @@ export const useQuoteHistory = () => {
     
     try {
       await setDoc(doc(db, 'quotes', newId), finalQuote);
-    } catch(e) {
-       handleFirestoreError(e, OperationType.CREATE, `quotes/${newId}`);
+    } catch (e) {
+      handleFirestoreError(e, OperationType.CREATE, `quotes/${newId}`);
     }
     
     return finalQuote;
-  }, [quotes, getNextFolio]);
+  }, [getNextFolio]);
 
+  const updateStatus = useCallback(async (
+    quoteId: string, 
+    newStatus: QuoteStatus, 
+    note?: string, 
+    operatorName?: string
+  ): Promise<void> => {
+    const quoteDocRef = doc(db, 'quotes', quoteId);
+    const snap = await getDoc(quoteDocRef);
+    if (!snap.exists()) {
+      throw new QuoteNotFoundError(quoteId);
+    }
 
-  const updateStatus = useCallback(async (quoteId: string, newStatus: QuoteStatus, note?: string, operatorName?: string) => {
-      const q = quotes.find(q => q.id === quoteId);
-      if (!q) return;
-      const now = new Date().toISOString();
-      const statusEvent: StatusEvent = {
-        from: q.status,
-        to: newStatus,
-        changedBy: operatorName || q.operatorName,
-        changedAt: now,
-        note
-      };
-      
-      try {
-        await updateDoc(doc(db, 'quotes', quoteId), {
-           status: newStatus,
-           updatedAt: now,
-           statusHistory: [statusEvent, ...q.statusHistory]
-        });
-      } catch(e) {
-        handleFirestoreError(e, OperationType.UPDATE, `quotes/${quoteId}`);
-      }
-  }, [quotes]);
-
-  const updateNotes = useCallback(async (quoteId: string, newNotes: string) => {
-      try {
-        await updateDoc(doc(db, 'quotes', quoteId), {
-          notes: newNotes,
-          updatedAt: new Date().toISOString()
-        });
-      } catch(e) {
-        handleFirestoreError(e, OperationType.UPDATE, `quotes/${quoteId}`);
-      }
+    const q = snap.data() as Quote;
+    const now = new Date().toISOString();
+    const statusEvent: StatusEvent = {
+      from: q.status,
+      to: newStatus,
+      changedBy: operatorName || q.operatorName,
+      changedAt: now,
+      note
+    };
+    
+    try {
+      await updateDoc(quoteDocRef, {
+        status: newStatus,
+        updatedAt: now,
+        statusHistory: [statusEvent, ...q.statusHistory]
+      });
+    } catch (e) {
+      handleFirestoreError(e, OperationType.UPDATE, `quotes/${quoteId}`);
+    }
   }, []);
 
-  const archiveQuote = useCallback(async (quoteId: string) => {
-      const q = quotes.find(q => q.id === quoteId);
-      if (!q) return;
-      try {
-        await updateDoc(doc(db, 'quotes', quoteId), {
-           isArchived: !q.isArchived,
-           updatedAt: new Date().toISOString()
-        });
-      } catch(e) {
-        handleFirestoreError(e, OperationType.UPDATE, `quotes/${quoteId}`);
-      }
-  }, [quotes]);
+  const updateNotes = useCallback(async (quoteId: string, newNotes: string): Promise<void> => {
+    try {
+      await updateDoc(doc(db, 'quotes', quoteId), {
+        notes: newNotes,
+        updatedAt: new Date().toISOString()
+      });
+    } catch (e) {
+      handleFirestoreError(e, OperationType.UPDATE, `quotes/${quoteId}`);
+    }
+  }, []);
 
-  const deleteQuote = useCallback(async (quoteId: string) => {
-    const q = quotes.find(q => q.id === quoteId);
-    if (!q) return;
-    
+  const archiveQuote = useCallback(async (quoteId: string): Promise<void> => {
+    const quoteDocRef = doc(db, 'quotes', quoteId);
+    const snap = await getDoc(quoteDocRef);
+    if (!snap.exists()) {
+      throw new QuoteNotFoundError(quoteId);
+    }
+
+    const q = snap.data() as Quote;
+    try {
+      await updateDoc(quoteDocRef, {
+        isArchived: !q.isArchived,
+        updatedAt: new Date().toISOString()
+      });
+    } catch (e) {
+      handleFirestoreError(e, OperationType.UPDATE, `quotes/${quoteId}`);
+    }
+  }, []);
+
+  const deleteQuote = useCallback(async (quoteId: string): Promise<void> => {
+    const quoteDocRef = doc(db, 'quotes', quoteId);
+    const snap = await getDoc(quoteDocRef);
+    if (!snap.exists()) {
+      throw new QuoteNotFoundError(quoteId);
+    }
+
+    const q = snap.data() as Quote;
     if (q.status !== 'borrador' && !q.isArchived) {
       throw new Error("Solo puedes eliminar borradores o cotizaciones archivadas. Archiva primero esta cotización.");
     }
     
     try {
-      await deleteDoc(doc(db, 'quotes', quoteId));
-    } catch(e) {
+      await deleteDoc(quoteDocRef);
+    } catch (e) {
       handleFirestoreError(e, OperationType.DELETE, `quotes/${quoteId}`);
     }
-  }, [quotes]);
+  }, []);
 
-  const cloneQuote = useCallback(async (quoteId: string): Promise<Quote | null> => {
-    const original = quotes.find(q => q.id === quoteId);
-    if (!original) return null;
-    
+  const cloneQuote = useCallback(async (quoteId: string): Promise<Quote> => {
+    const quoteDocRef = doc(db, 'quotes', quoteId);
+    const snap = await getDoc(quoteDocRef);
+    if (!snap.exists()) {
+      throw new QuoteNotFoundError(quoteId);
+    }
+
+    const original = snap.data() as Quote;
     const now = new Date().toISOString();
     const newId = Date.now().toString() + Math.random().toString(36).substring(2, 9);
+    const folio = await getNextFolio();
     const cloned: Quote = {
       id: newId,
       ownerId: "public",
-      folio: getNextFolio(),
-      clientName: original.clientName + ' (Copia)',
+      folio,
+      clientName: original.clientName ? `${original.clientName} (Copia)` : 'Copia',
       operatorName: original.operatorName,
       status: 'borrador',
       total: original.total,
-      globalMargin: original.globalMargin || 0,
+      globalMargin: typeof original.globalMargin === 'number' && Number.isFinite(original.globalMargin)
+        ? original.globalMargin 
+        : 30,
       items: original.items,
       createdAt: now,
       updatedAt: now,
@@ -225,11 +304,11 @@ export const useQuoteHistory = () => {
     
     try {
       await setDoc(doc(db, 'quotes', newId), cloned);
-    } catch(e) {
+    } catch (e) {
       handleFirestoreError(e, OperationType.CREATE, `quotes/${newId}`);
     }
     return cloned;
-  }, [quotes, getNextFolio]);
+  }, [getNextFolio]);
 
   return {
     quotes,
