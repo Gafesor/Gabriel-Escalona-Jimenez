@@ -8,10 +8,12 @@ import { exportQuoteToPDF } from '../lib/pdfHelper';
 import { MessagePresetsModal } from './MessagePresetsModal';
 
 interface QuoteHistoryProps {
-  onNewQuote: () => void;
-  onCloneQuote: (quote: Quote) => void;
+  onNewQuote?: () => void;
+  onCloneQuote?: (quote: Quote) => void;
   onEdit?: (quote: Quote) => void;
+  onEditDraft?: (quote: Quote) => void;
   onPrint?: (quote: Quote) => void;
+  onOpenPresetsModal?: () => void;
 }
 
 const formatMXN = (value: number) => {
@@ -36,7 +38,14 @@ const STATUS_COLORS: Record<QuoteStatus, string> = {
 type SortField = 'folio' | 'clientName' | 'operatorName' | 'total' | 'createdAt';
 type SortOrder = 'asc' | 'desc';
 
-export const QuoteHistory: React.FC<QuoteHistoryProps> = ({ onNewQuote, onCloneQuote, onEdit, onPrint }) => {
+export const QuoteHistory: React.FC<QuoteHistoryProps> = ({ 
+  onNewQuote, 
+  onCloneQuote, 
+  onEdit, 
+  onEditDraft, 
+  onPrint, 
+  onOpenPresetsModal 
+}) => {
   const { quotes, updateStatus, updateNotes, archiveQuote, deleteQuote, cloneQuote } = useQuoteHistory();
   const { success, error } = useToast();
 
@@ -222,9 +231,11 @@ export const QuoteHistory: React.FC<QuoteHistoryProps> = ({ onNewQuote, onCloneQ
           </div>
         </div>
         
-        <button onClick={onNewQuote} className="shrink-0 bg-[#059669] text-white px-6 py-3 border-2 border-[#059669] hover:bg-transparent hover:text-emerald-800 transition-colors uppercase font-mono text-xs font-bold tracking-widest flex items-center gap-2">
-          <Plus size={16} /> Nueva Cotización
-        </button>
+        {onNewQuote && (
+          <button onClick={onNewQuote} className="shrink-0 bg-[#059669] text-white px-6 py-3 border-2 border-[#059669] hover:bg-transparent hover:text-emerald-800 transition-colors uppercase font-mono text-xs font-bold tracking-widest flex items-center gap-2">
+            <Plus size={16} /> Nueva Cotización
+          </button>
+        )}
       </div>
 
       {/* Table & List */}
@@ -260,7 +271,7 @@ export const QuoteHistory: React.FC<QuoteHistoryProps> = ({ onNewQuote, onCloneQ
                         ? (search ? 'No hay resultados para la búsqueda.' : 'Aún no tienes cotizaciones guardadas.') 
                         : filter === 'archivadas' ? 'No tienes cotizaciones archivadas.' : `No hay cotizaciones con estado ${filter.toUpperCase()}.`}
                     </p>
-                    {filter === 'todas' && !search && (
+                    {filter === 'todas' && !search && onNewQuote && (
                       <button onClick={onNewQuote} className="mt-6 text-emerald-800 border-b border-[#059669] pb-1 uppercase font-mono text-[10px] tracking-widest hover:text-[#111827] hover:border-[#374151] transition-colors">
                         Crear primera cotización
                       </button>
@@ -318,9 +329,12 @@ export const QuoteHistory: React.FC<QuoteHistoryProps> = ({ onNewQuote, onCloneQ
                           onRevert={(status, note) => updateStatus(quote.id, status, note)}
                           onClone={async () => {
                             const newQ = await cloneQuote(quote.id);
-                            if (newQ) onCloneQuote(newQ);
+                            if (newQ && onCloneQuote) onCloneQuote(newQ);
                           }}
-                          onEdit={() => onEdit && onEdit(quote)}
+                          onEdit={() => {
+                            if (onEdit) onEdit(quote);
+                            else if (onEditDraft) onEditDraft(quote);
+                          }}
                           onUpdateNotes={(n) => updateNotes(quote.id, n)}
                           onArchive={() => handleArchive({ stopPropagation:()=>{} } as any, quote)}
                           onDelete={() => handleDelete({ stopPropagation:()=>{} } as any, quote)}
@@ -367,6 +381,14 @@ const QuoteDetail: React.FC<{
 
   const handleGeneratePDF = () => {
     exportQuoteToPDF(quote);
+  };
+
+  const handlePrintAction = () => {
+    if (onPrint) {
+      onPrint(quote);
+    } else {
+      window.print();
+    }
   };
 
   const handleCopyLink = () => {
@@ -565,9 +587,8 @@ const QuoteDetail: React.FC<{
               <Download size={14} /> PDF
             </button>
             <button 
-              onClick={() => onPrint && onPrint(quote)}
-              disabled={!onPrint}
-              className="bg-transparent border border-[#D1D5DB] text-[#374151] px-4 py-2 font-mono text-[10px] uppercase font-bold tracking-widest flex items-center gap-2 hover:bg-[#059669] hover:text-white hover:border-[#059669] transition-colors disabled:opacity-40"
+              onClick={handlePrintAction}
+              className="bg-transparent border border-[#D1D5DB] text-[#374151] px-4 py-2 font-mono text-[10px] uppercase font-bold tracking-widest flex items-center gap-2 hover:bg-[#059669] hover:text-white hover:border-[#059669] transition-colors cursor-pointer"
             >
               <Printer size={14} /> Imprimir
             </button>
