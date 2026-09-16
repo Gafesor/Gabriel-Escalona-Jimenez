@@ -1,14 +1,17 @@
 import React, { useState, useMemo } from 'react';
 import { Quote, QuoteStatus, useQuoteHistory } from '../hooks/useQuoteHistory';
 import { useToast } from '../hooks/useToast';
-import { Search, Plus, Archive, Trash2, ChevronDown, ChevronRight, FileText, Link as LinkIcon, Download, RotateCcw, MessageSquare, ArrowRight, X, MessageCircle, Inbox, AlertTriangle, Copy, Settings } from 'lucide-react';
+import { Search, Plus, Archive, Trash2, ChevronDown, ChevronRight, FileText, Link as LinkIcon, Download, RotateCcw, MessageSquare, ArrowRight, X, MessageCircle, Inbox, AlertTriangle, Copy, Settings, Printer } from 'lucide-react';
 import { format } from 'date-fns';
 import { es } from 'date-fns/locale';
+import { exportQuoteToPDF } from '../lib/pdfHelper';
+import { MessagePresetsModal } from './MessagePresetsModal';
 
 interface QuoteHistoryProps {
   onNewQuote: () => void;
   onCloneQuote: (quote: Quote) => void;
   onEdit?: (quote: Quote) => void;
+  onPrint?: (quote: Quote) => void;
 }
 
 const formatMXN = (value: number) => {
@@ -33,7 +36,7 @@ const STATUS_COLORS: Record<QuoteStatus, string> = {
 type SortField = 'folio' | 'clientName' | 'operatorName' | 'total' | 'createdAt';
 type SortOrder = 'asc' | 'desc';
 
-export const QuoteHistory: React.FC<QuoteHistoryProps> = ({ onNewQuote, onCloneQuote, onEdit }) => {
+export const QuoteHistory: React.FC<QuoteHistoryProps> = ({ onNewQuote, onCloneQuote, onEdit, onPrint }) => {
   const { quotes, updateStatus, updateNotes, archiveQuote, deleteQuote, cloneQuote } = useQuoteHistory();
   const { success, error } = useToast();
 
@@ -321,6 +324,7 @@ export const QuoteHistory: React.FC<QuoteHistoryProps> = ({ onNewQuote, onCloneQ
                           onUpdateNotes={(n) => updateNotes(quote.id, n)}
                           onArchive={() => handleArchive({ stopPropagation:()=>{} } as any, quote)}
                           onDelete={() => handleDelete({ stopPropagation:()=>{} } as any, quote)}
+                          onPrint={onPrint}
                         />
                       </td>
                     </tr>
@@ -346,12 +350,14 @@ const QuoteDetail: React.FC<{
   onUpdateNotes: (n: string) => void;
   onArchive: () => void;
   onDelete: () => void;
-}> = ({ quote, onAdvance, onRevert, onClone, onEdit, onUpdateNotes, onArchive, onDelete }) => {
+  onPrint?: (quote: Quote) => void;
+}> = ({ quote, onAdvance, onRevert, onClone, onEdit, onUpdateNotes, onArchive, onDelete, onPrint }) => {
   const [editingNotes, setEditingNotes] = useState(false);
   const [draftNotes, setDraftNotes] = useState(quote.notes);
   const [showDeletionConfirm, setShowDeletionConfirm] = useState(false);
   const [showAdvanceModal, setShowAdvanceModal] = useState(false);
   const [advanceNote, setAdvanceNote] = useState('');
+  const [isPresetsOpen, setIsPresetsOpen] = useState(false);
 
   const currentIndex = STATUS_ORDER.indexOf(quote.status);
   const nextStatus = currentIndex >= 0 && currentIndex < STATUS_ORDER.length - 1 ? STATUS_ORDER[currentIndex + 1] : null;
@@ -359,95 +365,8 @@ const QuoteDetail: React.FC<{
 
   const isCancelled = quote.status === 'cancelada';
 
-  const handleGeneratePDF = async () => {
-    // We recreate the PDF logic slightly adapted for history display
-    const { jsPDF } = await import('jspdf');
-    const doc = new jsPDF('p', 'mm', 'letter');
-    
-    const dateStr = format(new Date(quote.createdAt), "dd 'de' MMMM, yyyy", { locale: es });
-    const opName = quote.operatorName || 'Departamento de Cotizaciones';
-    const grandTotal = quote.total;
-
-    doc.setTextColor(5, 150, 105); 
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(24);
-    doc.text("CUBEUP³", 20, 20);
-    
-    doc.setTextColor(0, 0, 0);
-    doc.setFontSize(10);
-    doc.setFont("helvetica", "normal");
-    doc.text("Cotización Oficial de Manufactura Aditiva", 20, 28);
-    
-    doc.setFont("helvetica", "bold");
-    doc.text(`Folio:`, 140, 20);
-    doc.setFont("helvetica", "normal");
-    doc.text(quote.folio, 155, 20);
-
-    doc.setFont("helvetica", "bold");
-    doc.text(`Cliente:`, 140, 26);
-    doc.setFont("helvetica", "normal");
-    doc.text(doc.splitTextToSize(quote.clientName || 'Sin Nombre', 40), 155, 26);
-    
-    // Line
-    doc.setDrawColor(200, 200, 200);
-    doc.line(20, 35, 195, 35);
-
-    // Table Header
-    let yPos = 45;
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(9);
-    doc.text("CANT", 20, yPos);
-    doc.text("CONCEPTO", 35, yPos);
-    doc.text("ESPECIFICACIÓN", 95, yPos);
-    doc.text("P.UNITARIO", 150, yPos);
-    doc.text("SUBTOTAL", 175, yPos);
-    
-    doc.line(20, yPos + 2, 195, yPos + 2);
-    yPos += 10;
-
-    doc.setFont("helvetica", "normal");
-    quote.items.forEach(item => {
-      const isHw = item.itemType === 'hardware';
-      const specText = isHw ? item.profileName : `${item.profileName} (${item.weightInfo}g / ${item.timeInfo}h)`;
-      
-      doc.text(`${item.quantity}x`, 20, yPos);
-      
-      const splitName = doc.splitTextToSize(item.itemName.toUpperCase(), 55);
-      doc.text(splitName, 35, yPos);
-      
-      const splitSpec = doc.splitTextToSize(specText, 50);
-      doc.text(splitSpec, 95, yPos);
-      
-      doc.text(formatMXN(item.unitPrice), 150, yPos);
-      doc.setFont("helvetica", "bold");
-      doc.text(formatMXN(item.totalPrice), 175, yPos);
-      doc.setFont("helvetica", "normal");
-      
-      const maxLines = Math.max(splitName.length, splitSpec.length);
-      yPos += (maxLines * 5) + 3;
-      
-      if (yPos > 250) {
-        doc.addPage();
-        yPos = 20;
-      }
-    });
-
-    doc.line(20, yPos, 195, yPos);
-    yPos += 10;
-
-    doc.setFontSize(14);
-    doc.setTextColor(0,0,0);
-    doc.text("Total Facturable:", 120, yPos);
-    doc.setTextColor(5, 150, 105); 
-    doc.setFont("helvetica", "bold");
-    doc.text(formatMXN(grandTotal), 160, yPos);
-
-    doc.setTextColor(150, 150, 150);
-    doc.setFontSize(8);
-    doc.setFont("helvetica", "italic");
-    doc.text("Cotización generada por CubeUp³", 20, 270);
-    
-    doc.save(`cubeup3-${quote.folio}.pdf`);
+  const handleGeneratePDF = () => {
+    exportQuoteToPDF(quote);
   };
 
   const handleCopyLink = () => {
@@ -645,6 +564,19 @@ const QuoteDetail: React.FC<{
             <button onClick={handleGeneratePDF} className="bg-transparent border border-[#D1D5DB] text-[#374151] px-4 py-2 font-mono text-[10px] uppercase font-bold tracking-widest flex items-center gap-2 hover:bg-slate-800 hover:text-white transition-colors">
               <Download size={14} /> PDF
             </button>
+            <button 
+              onClick={() => onPrint && onPrint(quote)}
+              disabled={!onPrint}
+              className="bg-transparent border border-[#D1D5DB] text-[#374151] px-4 py-2 font-mono text-[10px] uppercase font-bold tracking-widest flex items-center gap-2 hover:bg-[#059669] hover:text-white hover:border-[#059669] transition-colors disabled:opacity-40"
+            >
+              <Printer size={14} /> Imprimir
+            </button>
+            <button 
+              onClick={() => setIsPresetsOpen(true)}
+              className="bg-transparent border border-[#D1D5DB] text-[#374151] px-4 py-2 font-mono text-[10px] uppercase font-bold tracking-widest flex items-center gap-2 hover:bg-[#059669] hover:text-white hover:border-[#059669] transition-colors"
+            >
+              <MessageCircle size={14} /> Presets Chat
+            </button>
             <button onClick={handleCopyLink} className="bg-transparent border border-[#D1D5DB] text-[#374151] px-4 py-2 font-mono text-[10px] uppercase font-bold tracking-widest flex items-center gap-2 hover:bg-slate-800 hover:text-white transition-colors" title="Copiar Link">
               <LinkIcon size={14} /> Link
             </button>
@@ -661,6 +593,15 @@ const QuoteDetail: React.FC<{
           
         </div>
       )}
+      <MessagePresetsModal 
+        isOpen={isPresetsOpen}
+        onClose={() => setIsPresetsOpen(false)}
+        clientName={quote.clientName}
+        operatorName={quote.operatorName || ''}
+        folio={quote.folio}
+        items={quote.items}
+        total={quote.total}
+      />
     </div>
   );
 };

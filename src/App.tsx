@@ -1,107 +1,105 @@
-import React, { useState, useEffect, useMemo } from 'react';
-import { QuoteHistory } from './components/QuoteHistory';
-import { useQuoteHistory, Quote, TicketItem } from './hooks/useQuoteHistory';
-import { auth, provider } from './lib/firebase';
-import { signInWithPopup, signOut } from 'firebase/auth';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
-  Calculator, History, Cpu, DollarSign, Target, Settings, Copy, Save, Share2, LogOut, Check, FileText, User, Printer, Plus, Trash2, X 
+  Printer, 
+  Cpu, 
+  Plus, 
+  Trash2, 
+  Settings, 
+  FileText, 
+  Save, 
+  RotateCcw, 
+  ExternalLink, 
+  Check, 
+  X,
+  History,
+  Share2,
+  Clock,
+  Sparkles,
+  Send,
+  MessageSquare,
+  Minus
 } from 'lucide-react';
+import { useQuoteHistory, TicketItem, Quote } from './hooks/useQuoteHistory';
+import { QuoteHistory } from './components/QuoteHistory';
+import { MessagePresetsModal } from './components/MessagePresetsModal';
+import { exportQuoteToPDF } from './lib/pdfHelper';
 
-const PRESET_OPERATORS = [
-  "Ing. Carlos Pérez - Lead 3D",
-  "Dis. Ana Lilia - Diseño Industrial",
-  "Tech. José Gutiérrez - Op Máquinas",
-  "Ing. Marcos - Producción FFF"
+interface Profile {
+  id: string;
+  name: string;
+  spoolCost: number;     // $/kg
+  machineHour: number;   // $/hour
+}
+
+const DEFAULT_PROFILES: Profile[] = [
+  { id: '1', name: 'PLA Estándar (CubeUp)', spoolCost: 450, machineHour: 25 },
+  { id: '2', name: 'PETG Resistencia', spoolCost: 550, machineHour: 30 },
+  { id: '3', name: 'ABS / ASA Técnico', spoolCost: 650, machineHour: 35 },
+  { id: '4', name: 'TPU Flexible', spoolCost: 750, machineHour: 40 },
+  { id: '5', name: 'Resina Estándar 4K', spoolCost: 800, machineHour: 45 },
 ];
 
-const DEFAULT_PROFILES = [
-  { id: 'pla', name: 'PLA Estándar', spoolCost: 500, machineHour: 15 },
-  { id: 'petg', name: 'PETG Industrial', spoolCost: 800, machineHour: 20 },
-  { id: 'abs', name: 'ABS / ASA', spoolCost: 1000, machineHour: 30 },
-  { id: 'tpu', name: 'TPU Flexible', spoolCost: 1200, machineHour: 25 },
-];
+const DEFAULT_OPERATORS: string[] = ['Gabriel', 'Andrea', 'Carlos'];
 
-export const formatMXN = (val: number) => new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN' }).format(val);
+const formatMXN = (val: number) => {
+  return new Intl.NumberFormat('es-MX', {
+    style: 'currency',
+    currency: 'MXN',
+    minimumFractionDigits: 2
+  }).format(val);
+};
 
-function MainApp() {
-  const [currentTab, setCurrentTab] = useState<'calculator' | 'history'>('calculator');
-  const [ticketItems, setTicketItems] = useState<TicketItem[]>([]);
-  const [savedQuoteId, setSavedQuoteId] = useState<string | null>(null);
-  
-  // Header Details
+export function App() {
+  const [activeTab, setActiveTab] = useState<'calculator' | 'history'>('calculator');
   const [operatorName, setOperatorName] = useState('');
   const [clientName, setClientName] = useState('');
-  
-  // Custom operators
+  const [isAddingOperator, setIsAddingOperator] = useState(false);
+  const [newOperatorInput, setNewOperatorInput] = useState('');
+  const [ticketItems, setTicketItems] = useState<TicketItem[]>([]);
+  const [savedQuoteId, setSavedQuoteId] = useState<string | null>(null);
+  const [showPresetsModal, setShowPresetsModal] = useState(false);
+
+  // Autosave reference to prevent infinite loops
+  const lastSavedStateRef = useRef<string>('');
+
+  // Operator Profiles
   const [presetOperators, setPresetOperators] = useState<string[]>(() => {
     const saved = localStorage.getItem('cubeup3-custom-operators');
-    if (saved) return JSON.parse(saved);
-    return PRESET_OPERATORS;
+    if (saved) {
+      try { return JSON.parse(saved); } catch (e) { console.error(e); }
+    }
+    return DEFAULT_OPERATORS;
   });
-  const [isEditingOperators, setIsEditingOperators] = useState(false);
-  const [newOperatorInput, setNewOperatorInput] = useState('');
 
-  // Custom profiles
-  const [profiles, setProfiles] = useState<any[]>(() => {
+  // Profiles
+  const [profiles, setProfiles] = useState<Profile[]>(() => {
     const saved = localStorage.getItem('cubeup3-custom-profiles');
     if (saved) {
-       const parsed = JSON.parse(saved);
-       return parsed.map((p: any) => ({
-         ...p,
-         spoolCost: p.spoolCost !== undefined ? p.spoolCost : (p.materialCost ? p.materialCost * 1000 : 500),
-         machineHour: p.machineHour !== undefined ? p.machineHour : 15
-       }));
+      try { return JSON.parse(saved); } catch (e) { console.error(e); }
     }
     return DEFAULT_PROFILES;
   });
+
+  // Modal Settings
   const [isEditingProfiles, setIsEditingProfiles] = useState(false);
-  const [newProfileInput, setNewProfileInput] = useState({ name: '', spoolCost: '', machineHour: '' });
-  
-  const [profileEditingId, setProfileEditingId] = useState<string | null>(null);
-  const [editProfileInput, setEditProfileInput] = useState({ name: '', spoolCost: '', machineHour: '' });
-
-  const startEditProfile = (p: any) => {
-    setProfileEditingId(p.id);
-    setEditProfileInput({
-      name: p.name,
-      spoolCost: p.spoolCost.toString(),
-      machineHour: p.machineHour.toString()
-    });
-  };
-
-  const handleUpdateProfile = () => {
-    if (!editProfileInput.name.trim() || !editProfileInput.spoolCost || !editProfileInput.machineHour) return;
-    
-    const updated = profiles.map(p => {
-      if (p.id === profileEditingId) {
-        return {
-          ...p,
-          name: editProfileInput.name.trim(),
-          spoolCost: Number(editProfileInput.spoolCost),
-          machineHour: Number(editProfileInput.machineHour),
-        };
-      }
-      return p;
-    });
-    
-    setProfiles(updated);
-    localStorage.setItem('cubeup3-custom-profiles', JSON.stringify(updated));
-    setProfileEditingId(null);
-  };
+  const [newProfileName, setNewProfileName] = useState('');
+  const [newProfileSpool, setNewProfileSpool] = useState<number | ''>('');
+  const [newProfileHour, setNewProfileHour] = useState<number | ''>('');
 
   const handleAddProfile = () => {
-    if (!newProfileInput.name.trim() || !newProfileInput.spoolCost || !newProfileInput.machineHour) return;
-    const p = {
+    if (!newProfileName || newProfileSpool === '' || newProfileHour === '') return;
+    const newP: Profile = {
       id: Math.random().toString(),
-      name: newProfileInput.name.trim(),
-      spoolCost: Number(newProfileInput.spoolCost),
-      machineHour: Number(newProfileInput.machineHour),
+      name: newProfileName,
+      spoolCost: Number(newProfileSpool),
+      machineHour: Number(newProfileHour)
     };
-    const updated = [...profiles, p];
+    const updated = [...profiles, newP];
     setProfiles(updated);
     localStorage.setItem('cubeup3-custom-profiles', JSON.stringify(updated));
-    setProfileId(p.id);
-    setNewProfileInput({ name: '', spoolCost: '', machineHour: '' });
+    setNewProfileName('');
+    setNewProfileSpool('');
+    setNewProfileHour('');
   };
 
   const handleRemoveProfile = (idStr: string) => {
@@ -119,6 +117,7 @@ function MainApp() {
     localStorage.setItem('cubeup3-custom-operators', JSON.stringify(updated));
     setOperatorName(newOperatorInput.trim());
     setNewOperatorInput('');
+    setIsAddingOperator(false);
   };
 
   const handleRemoveOperator = (op: string) => {
@@ -128,16 +127,20 @@ function MainApp() {
     if (operatorName === op) setOperatorName('');
   };
 
-  
   // Calculate Item form
   const [itemName, setItemName] = useState('');
+  const [itemQuantity, setItemQuantity] = useState<number>(1);
   const [profileId, setProfileId] = useState(() => {
     const saved = localStorage.getItem('cubeup3-custom-profiles');
     if (saved) {
-      const parsed = JSON.parse(saved);
-      if (parsed.length > 0) return parsed[0].id;
+      try {
+        const parsed = JSON.parse(saved);
+        if (parsed.length > 0) return parsed[0].id;
+      } catch (e) {
+        console.error(e);
+      }
     }
-    return 'pla';
+    return DEFAULT_PROFILES[0].id;
   });
   const [weight, setWeight] = useState<number | ''>('');
   const [hours, setHours] = useState<number | ''>('');
@@ -148,6 +151,7 @@ function MainApp() {
   
   // Hardware form
   const [hwName, setHwName] = useState('');
+  const [hwQuantity, setHwQuantity] = useState<number>(1);
   const [hwPrice, setHwPrice] = useState<number | ''>('');
   const [editItemId, setEditItemId] = useState<string | null>(null);
 
@@ -177,56 +181,119 @@ function MainApp() {
     })));
   }, [globalMargin]);
 
-  // Real-time autosave for drafts (debounced 1.5s)
+  // Real-time autosave (debounced 1.5s) with dirtiness protection
   useEffect(() => {
-    if (!savedQuoteId || ticketItems.length === 0) return;
-    const currentQuote = quotes.find(q => q.id === savedQuoteId);
-    if (currentQuote && currentQuote.status !== 'borrador') return;
+    if (ticketItems.length === 0) return;
 
-    const timeoutMsg = setTimeout(() => {
-       saveQuote(ticketItems, operatorName, clientName, currentQuote?.notes || '', globalMargin, savedQuoteId).catch(console.error);
+    const currentStateStr = JSON.stringify({
+      ticketItems,
+      operatorName: operatorName.trim(),
+      clientName: clientName.trim(),
+      globalMargin
+    });
+
+    if (currentStateStr === lastSavedStateRef.current) return;
+
+    if (savedQuoteId) {
+      const currentQuote = quotes.find(q => q.id === savedQuoteId);
+      if (currentQuote && currentQuote.status !== 'borrador') return;
+    }
+
+    const timeoutMsg = setTimeout(async () => {
+      try {
+        const currentQuote = savedQuoteId ? quotes.find(q => q.id === savedQuoteId) : null;
+        const q = await saveQuote(
+          ticketItems, 
+          operatorName, 
+          clientName, 
+          currentQuote?.notes || '', 
+          globalMargin, 
+          savedQuoteId || undefined
+        );
+        lastSavedStateRef.current = currentStateStr;
+        if (!savedQuoteId && q?.id) {
+          setSavedQuoteId(q.id);
+        }
+      } catch (e) {
+        console.error("Autosave falló:", e);
+      }
     }, 1500);
+
     return () => clearTimeout(timeoutMsg);
   }, [ticketItems, operatorName, clientName, globalMargin, savedQuoteId, saveQuote, quotes]);
+
+  const handleGenerateLocalPDF = () => {
+    if (ticketItems.length === 0) return;
+    exportQuoteToPDF({
+      folio: savedQuoteId ? (quotes.find(q => q.id === savedQuoteId)?.folio || 'BORRADOR') : 'CUB-NUEVO',
+      clientName: clientName || 'Cliente',
+      operatorName: operatorName || 'Asesor Técnico',
+      createdAt: new Date(),
+      items: ticketItems,
+      total: lgTotals
+    });
+  };
 
   const handleAddPiece = (e: React.FormEvent) => {
     e.preventDefault();
     if (!itemName || weight === '' || hours === '') return;
-    const profile = profiles.find(p => p.id === profileId)!;
     
+    const profile = profiles.find(p => p.id === profileId);
+    if (!profile) return;
+
+    const qty = Math.max(1, itemQuantity || 1);
     const w = Number(weight);
     const h = Number(hours);
+    const labor = Number(pieceLabor) || 0;
+
     const materialCost = (w / 1000) * (profile.spoolCost || 500);
     const machineCost = h * profile.machineHour;
-    const labor = Number(pieceLabor) || 0;
-    
-    const unitCost = materialCost + machineCost + labor;
-    const unitPrice = unitCost * (1 + globalMargin / 100);
-
-    const newItem = {
-      id: editItemId || Math.random().toString(),
-      itemName: itemName,
-      quantity: 1,
-      profileName: profile.name,
-      weightInfo: w,
-      timeInfo: h,
-      unitCost: unitCost,
-      totalCost: unitCost,
-      unitPrice: unitPrice,
-      totalPrice: unitPrice,
-      itemType: 'print' as const,
-      profileId: profile.id,
-      laborInfo: labor
-    };
+    const baseCost = materialCost + machineCost + labor;
+    const finalPrice = baseCost * (1 + (globalMargin / 100));
 
     if (editItemId) {
-      setTicketItems(ticketItems.map(item => item.id === editItemId ? newItem : item));
+      setTicketItems(ticketItems.map(item => {
+        if (item.id === editItemId) {
+          return {
+            ...item,
+            itemName,
+            quantity: qty,
+            profileName: profile.name,
+            profileId: profile.id,
+            weightInfo: w,
+            timeInfo: h,
+            laborInfo: labor,
+            unitCost: baseCost,
+            totalCost: baseCost * qty,
+            unitPrice: finalPrice,
+            totalPrice: finalPrice * qty,
+            itemType: 'print'
+          };
+        }
+        return item;
+      }));
       setEditItemId(null);
     } else {
+      const newItem: TicketItem = {
+        id: Math.random().toString(),
+        itemName,
+        quantity: qty,
+        profileName: profile.name,
+        profileId: profile.id,
+        weightInfo: w,
+        timeInfo: h,
+        laborInfo: labor,
+        unitCost: baseCost,
+        totalCost: baseCost * qty,
+        unitPrice: finalPrice,
+        totalPrice: finalPrice * qty,
+        itemType: 'print'
+      };
       setTicketItems([...ticketItems, newItem]);
     }
-    
+
     setItemName('');
+    setItemQuantity(1);
     setWeight('');
     setHours('');
     setPieceLabor('');
@@ -235,39 +302,75 @@ function MainApp() {
   const handleAddHardware = (e: React.FormEvent) => {
     e.preventDefault();
     if (!hwName || hwPrice === '') return;
-    const cost = Number(hwPrice);
-    const price = cost * (1 + globalMargin / 100);
-    const newItem = {
-      id: editItemId || Math.random().toString(),
-      itemName: hwName,
-      quantity: 1,
-      profileName: 'Hardware Adicional',
-      weightInfo: 0,
-      timeInfo: 0,
-      unitCost: cost,
-      totalCost: cost,
-      unitPrice: price,
-      totalPrice: price,
-      itemType: 'hardware' as const
-    };
+
+    const qty = Math.max(1, hwQuantity || 1);
+    const baseCost = Number(hwPrice);
+    const finalPrice = baseCost * (1 + (globalMargin / 100));
 
     if (editItemId) {
-      setTicketItems(ticketItems.map(item => item.id === editItemId ? newItem : item));
+      setTicketItems(ticketItems.map(item => {
+        if (item.id === editItemId) {
+          return {
+            ...item,
+            itemName: hwName,
+            quantity: qty,
+            profileName: 'Hardware / Accesorio',
+            unitCost: baseCost,
+            totalCost: baseCost * qty,
+            unitPrice: finalPrice,
+            totalPrice: finalPrice * qty,
+            itemType: 'hardware'
+          };
+        }
+        return item;
+      }));
       setEditItemId(null);
     } else {
+      const newItem: TicketItem = {
+        id: Math.random().toString(),
+        itemName: hwName,
+        quantity: qty,
+        profileName: 'Hardware / Accesorio',
+        weightInfo: 0,
+        timeInfo: 0,
+        unitCost: baseCost,
+        totalCost: baseCost * qty,
+        unitPrice: finalPrice,
+        totalPrice: finalPrice * qty,
+        itemType: 'hardware'
+      };
       setTicketItems([...ticketItems, newItem]);
     }
+
     setHwName('');
+    setHwQuantity(1);
     setHwPrice('');
+  };
+
+  const updateItemQuantity = (id: string, newQty: number) => {
+    const validQty = Math.max(1, newQty);
+    setTicketItems(prev => prev.map(item => {
+      if (item.id === id) {
+        return {
+          ...item,
+          quantity: validQty,
+          totalCost: item.unitCost * validQty,
+          totalPrice: item.unitPrice * validQty
+        };
+      }
+      return item;
+    }));
   };
 
   const cancelEdit = () => {
     setEditItemId(null);
     setItemName('');
+    setItemQuantity(1);
     setWeight('');
     setHours('');
     setPieceLabor('');
     setHwName('');
+    setHwQuantity(1);
     setHwPrice('');
   };
 
@@ -275,10 +378,11 @@ function MainApp() {
     setEditItemId(item.id);
     if (item.itemType === 'hardware') {
       setHwName(item.itemName);
+      setHwQuantity(item.quantity || 1);
       setHwPrice(item.unitCost.toString() as any);
-      // scroll to hardware form
     } else {
       setItemName(item.itemName);
+      setItemQuantity(item.quantity || 1);
       if (item.profileId && profiles.some(p => p.id === item.profileId)) {
         setProfileId(item.profileId);
       }
@@ -292,7 +396,7 @@ function MainApp() {
   const handleSave = async () => {
     if (ticketItems.length === 0) return;
     try {
-      const q = await saveQuote(ticketItems, operatorName, clientName, '', savedQuoteId || undefined);
+      const q = await saveQuote(ticketItems, operatorName, clientName, '', globalMargin, savedQuoteId || undefined);
       setSavedQuoteId(q.id);
     } catch (e) {
       console.error(e);
@@ -300,373 +404,679 @@ function MainApp() {
   };
 
   const handleEditDraft = (quote: Quote) => {
+    const defaultMargin = typeof quote.globalMargin === 'number' && Number.isFinite(quote.globalMargin)
+      ? quote.globalMargin 
+      : 30;
     setTicketItems(quote.items);
     setClientName(quote.clientName || '');
     setOperatorName(quote.operatorName || '');
+    setGlobalMargin(defaultMargin);
     setSavedQuoteId(quote.id);
-    setCurrentTab('calculator');
+    
+    lastSavedStateRef.current = JSON.stringify({
+      ticketItems: quote.items,
+      operatorName: (quote.operatorName || '').trim(),
+      clientName: (quote.clientName || '').trim(),
+      globalMargin: defaultMargin
+    });
+    
+    setActiveTab('calculator');
   };
 
-  const lgTotals = ticketItems.reduce((acc, i) => acc + (i.totalPrice || 0), 0);
-  const lgCosts = ticketItems.reduce((acc, i) => acc + (i.totalCost || 0), 0);
-  const lgProfit = lgTotals - lgCosts;
+  const handleClear = () => {
+    setTicketItems([]);
+    setSavedQuoteId(null);
+    setClientName('');
+    lastSavedStateRef.current = '';
+  };
+
+  // Totals
+  const lgTotals = useMemo(() => {
+    return ticketItems.reduce((acc, i) => acc + (i.totalPrice || 0), 0);
+  }, [ticketItems]);
+
+  const lgCosts = useMemo(() => {
+    return ticketItems.reduce((acc, i) => acc + (i.totalCost || 0), 0);
+  }, [ticketItems]);
+
+  const lgProfit = useMemo(() => {
+    return lgTotals - lgCosts;
+  }, [lgTotals, lgCosts]);
 
   return (
-    <div className="min-h-screen bg-[#F0FDF4] flex flex-col font-sans text-stone-900 border-t-4 border-[#065F46]">
-      {/* Header Compacto */}
-      <header className="bg-white border-b border-[#A7F3D0] shadow-sm px-6 py-3 flex justify-between items-center sticky top-0 z-50">
-        <div className="flex items-center gap-3 w-1/4">
-          <div className="bg-[#059669] text-white p-2 rounded-lg shadow-inner"><Target size={20} /></div>
+    <div className="min-h-screen bg-[#F7F5F0] text-[#2B2B2B] flex flex-col font-sans selection:bg-[#82C69E] selection:text-[#1B4D3E]">
+      
+      {/* Brand Header Bar */}
+      <header className="bg-[#1B4D3E] text-white py-3 px-4 lg:px-8 flex justify-between items-center shadow-md border-b border-[#2E7D32]">
+        <div className="flex items-center gap-3">
+          <div className="bg-[#82C69E] text-[#1B4D3E] p-1.5 rounded-lg font-black text-xl tracking-wider shadow-inner">
+            C³
+          </div>
           <div>
-            <h1 className="font-bold text-gray-900 text-lg leading-tight tracking-tight">CubeUp³</h1>
-            <p className="text-[9px] uppercase font-mono text-emerald-800 font-bold tracking-widest hidden lg:block">Inteligencia Compartida</p>
+            <h1 className="font-extrabold text-base lg:text-lg tracking-tight flex items-center gap-2">
+              CubeUp³ <span className="text-[#82C69E] text-xs px-2 py-0.5 rounded-full border border-[#82C69E]/40 font-mono">TALLER FDM & MSLA</span>
+            </h1>
+            <p className="text-[11px] text-gray-300 font-mono">Cotizador Técnico de Manufactura Aditiva</p>
           </div>
         </div>
 
-        <div className="flex bg-[#ECFDF5] p-1 rounded-xl shadow-inner border border-[#D1FAE5]">
-          <button 
-             onClick={() => setCurrentTab('calculator')}
-             className={`px-6 py-1.5 rounded-lg text-xs font-bold uppercase tracking-wider flex items-center gap-2 transition-all ${currentTab === 'calculator' ? 'bg-white shadow text-[#065F46]' : 'text-emerald-800 hover:bg-[#D1FAE5]'}`}
-          >
-            <Calculator size={14} /> Taller
-          </button>
-          <button 
-             onClick={() => setCurrentTab('history')}
-             className={`px-6 py-1.5 rounded-lg text-xs font-bold uppercase tracking-wider flex items-center gap-2 transition-all ${currentTab === 'history' ? 'bg-white shadow text-[#065F46]' : 'text-emerald-800 hover:bg-[#D1FAE5]'}`}
-          >
-            <History size={14} /> Historial
-          </button>
-        </div>
-
-        <div className="flex items-center gap-4 w-1/4 justify-end">
-          <div className="text-right hidden sm:block">
-            <p className="text-xs font-bold text-gray-900">Usuario Público</p>
-            <p className="text-[10px] text-emerald-800">Acceso Compartido</p>
+        {/* Global Nav Toggles */}
+        <div className="flex items-center gap-2">
+          <div className="bg-[#153e32] p-1 rounded-xl flex items-center border border-[#2E7D32]">
+            <button
+              onClick={() => setActiveTab('calculator')}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                activeTab === 'calculator' 
+                  ? 'bg-[#2E7D32] text-white shadow-sm' 
+                  : 'text-gray-300 hover:text-white'
+              }`}
+            >
+              <Printer size={14} /> Cotizador
+            </button>
+            <button
+              onClick={() => setActiveTab('history')}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                activeTab === 'history' 
+                  ? 'bg-[#2E7D32] text-white shadow-sm' 
+                  : 'text-gray-300 hover:text-white'
+              }`}
+            >
+              <History size={14} /> Historial
+            </button>
           </div>
         </div>
       </header>
 
-      {/* Main Area */}
-      <main className="flex-1 max-w-[1600px] w-full mx-auto p-4 lg:p-6 overflow-hidden flex flex-col">
-        {currentTab === 'history' ? (
+      {/* Main Content Area */}
+      <main className="flex-1 max-w-7xl w-full mx-auto p-4 lg:p-6 flex flex-col gap-6">
+        
+        {activeTab === 'history' ? (
           <QuoteHistory 
-             onNewQuote={() => {
-               setTicketItems([]);
-               setClientName('');
-               setSavedQuoteId(null);
-               setCurrentTab('calculator');
-             }}
-             onEdit={handleEditDraft}
-             onCloneQuote={(quote) => {
-               const newItems = quote.items.map(it => ({ ...it, id: Math.random().toString() }));
-               setTicketItems(newItems);
-               setClientName(quote.clientName);
-               setOperatorName(quote.operatorName);
-               setSavedQuoteId(quote.id);
-               setCurrentTab('calculator');
-             }}
+            onEditDraft={handleEditDraft}
+            onOpenPresetsModal={() => setShowPresetsModal(true)}
           />
         ) : (
-          <div className="grid grid-cols-1 md:grid-cols-12 gap-4 lg:gap-6 h-full flex-1 min-h-0">
-             
-             {/* Left Col: Config & Add */}
-             <div className="md:col-span-5 xl:col-span-4 flex flex-col gap-4 overflow-y-auto pr-2 pb-10">
+          <>
+            {/* Top Workspace Grid */}
+            <div className="grid grid-cols-1 md:grid-cols-12 gap-6 items-start">
+              
+              {/* Left Col: Inputs & Add forms */}
+              <div className="md:col-span-5 xl:col-span-4 flex flex-col gap-5">
                 
-                {/* Metadatos del ticket */}
-                <div className="bg-white p-5 rounded-2xl border border-[#A7F3D0] shadow-sm flex flex-col gap-4">
-                  <h3 className="text-xs uppercase font-bold text-gray-900 flex items-center gap-2 mb-1"><User size={14}/> Datos Solicitud</h3>
+                {/* Asesor & Cliente Box */}
+                <div className="bg-white p-4 rounded-2xl border border-[#82C69E]/50 shadow-sm flex flex-col gap-3">
                   <div className="flex flex-col gap-1">
                     <div className="flex justify-between items-center">
-                      <label className="text-[10px] uppercase font-mono text-emerald-800 font-bold">Asesor Responsable</label>
-                      <button type="button" onClick={() => setIsEditingOperators(!isEditingOperators)} className="text-[10px] uppercase font-mono text-emerald-800 hover:underline flex items-center gap-1 cursor-pointer">
-                        <Settings size={10} /> Editar Opciones
+                      <label className="text-[10px] uppercase font-mono text-[#1B4D3E] font-bold">Asesor Técnico (Operador)</label>
+                      <button 
+                        type="button" 
+                        onClick={() => setIsAddingOperator(!isAddingOperator)}
+                        className="text-[10px] text-[#2E7D32] hover:underline font-bold flex items-center gap-1"
+                      >
+                        {isAddingOperator ? 'Ver lista' : '+ Nuevo asesor'}
                       </button>
                     </div>
-                    {isEditingOperators ? (
-                      <div className="flex flex-col gap-2 p-2 bg-[#F0FDF4] border border-[#A7F3D0] rounded-lg mt-1">
-                        {presetOperators.map(op => (
-                          <div key={op} className="flex justify-between items-center text-xs font-bold text-gray-900 bg-white p-2 rounded shadow-sm">
-                            {op}
-                            <button type="button" onClick={() => handleRemoveOperator(op)} className="text-red-500 opacity-60 hover:opacity-100"><Trash2 size={14}/></button>
-                          </div>
-                        ))}
-                        <div className="flex gap-2">
-                           <input type="text" value={newOperatorInput} onChange={e => setNewOperatorInput(e.target.value)} placeholder="Nuevo asesor..." className="flex-1 bg-white border border-[#A7F3D0] rounded-lg p-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-[#059669]" />
-                           <button type="button" onClick={handleAddOperator} className="bg-[#059669] text-white p-1.5 rounded-lg hover:bg-[#064E3B] flex-shrink-0 cursor-pointer"><Plus size={14}/></button>
-                        </div>
+
+                    {isAddingOperator ? (
+                      <div className="flex gap-2">
+                        <input 
+                          type="text" 
+                          value={newOperatorInput} 
+                          onChange={e => setNewOperatorInput(e.target.value)}
+                          placeholder="Nombre del asesor..."
+                          className="flex-1 bg-[#F7F5F0] border border-[#82C69E] rounded-lg p-2 text-xs font-bold focus:outline-none focus:ring-1 focus:ring-[#1B4D3E]"
+                        />
+                        <button 
+                          onClick={handleAddOperator}
+                          className="bg-[#1B4D3E] text-white px-3 py-1.5 rounded-lg text-xs font-bold hover:bg-[#2E7D32]"
+                        >
+                          Guardar
+                        </button>
                       </div>
                     ) : (
                       <select 
-                        value={operatorName} onChange={e => setOperatorName(e.target.value)}
-                        className="w-full bg-[#F0FDF4] border border-[#A7F3D0] rounded-lg p-2 text-sm font-bold text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#059669] cursor-pointer"
+                        value={operatorName} 
+                        onChange={e => setOperatorName(e.target.value)}
+                        className="w-full bg-[#F7F5F0] border border-[#82C69E]/80 rounded-lg p-2 text-sm font-bold text-[#2B2B2B] focus:outline-none focus:ring-1 focus:ring-[#1B4D3E]"
                       >
-                        <option value="">Seleccione o escriba...</option>
+                        <option value="">Seleccione asesor técnico...</option>
                         {presetOperators.map(op => <option key={op} value={op}>{op}</option>)}
                       </select>
                     )}
                   </div>
+
                   <div className="flex flex-col gap-1">
-                    <label className="text-[10px] uppercase font-mono text-emerald-800 font-bold">Cliente / Proyecto (Opcional)</label>
+                    <label className="text-[10px] uppercase font-mono text-[#1B4D3E] font-bold">Cliente / Proyecto (Opcional)</label>
                     <input 
-                      type="text" value={clientName} onChange={e => setClientName(e.target.value)}
-                      placeholder="Nombre de la empresa o proyecto..."
-                      className="w-full bg-[#F0FDF4] border border-[#A7F3D0] rounded-lg p-2 text-sm font-bold text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#059669]"
+                      type="text" 
+                      value={clientName} 
+                      onChange={e => setClientName(e.target.value)}
+                      placeholder="Empresa o contacto..."
+                      className="w-full bg-[#F7F5F0] border border-[#82C69E]/80 rounded-lg p-2 text-sm font-bold text-[#2B2B2B] focus:outline-none focus:ring-1 focus:ring-[#1B4D3E]"
                     />
                   </div>
                 </div>
 
-                {/* Calculadora (Piezas) */}
-                <form onSubmit={handleAddPiece} className="bg-white p-5 rounded-2xl border border-[#A7F3D0] shadow-sm flex flex-col gap-4">
-                  <h3 className="text-xs uppercase font-bold text-gray-900 flex items-center gap-2 mb-1"><Printer size={14}/> Dictamen de Impresión</h3>
+                {/* Calculadora (Piezas FDM / Dictamen) */}
+                <form onSubmit={handleAddPiece} className="bg-white p-5 rounded-2xl border border-[#82C69E]/60 shadow-sm flex flex-col gap-4">
+                  <div className="flex items-center justify-between">
+                    <h3 className="text-xs uppercase font-bold text-[#1B4D3E] flex items-center gap-2">
+                      <Printer size={15}/> Dictamen de Impresión
+                    </h3>
+                    <span className="text-[10px] bg-[#F7F5F0] text-[#2E7D32] px-2 py-0.5 rounded font-mono font-bold border border-[#82C69E]/40">
+                      Lote Configurable
+                    </span>
+                  </div>
                   
-                  <input type="text" value={itemName} onChange={e=>setItemName(e.target.value)} placeholder="Nombre de la pieza (Ej. Engranaje V2)" className="w-full bg-[#F0FDF4] border border-[#A7F3D0] rounded-lg p-2 text-sm font-bold text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#059669] placeholder-[#059669]/50" />
+                  {/* Nombre y Cantidad de Piezas */}
+                  <div className="grid grid-cols-3 gap-2">
+                    <div className="col-span-2 flex flex-col gap-1">
+                      <label className="text-[10px] uppercase font-mono text-[#1B4D3E] font-bold">Descripción de la Pieza</label>
+                      <input 
+                        type="text" 
+                        value={itemName} 
+                        onChange={e => setItemName(e.target.value)} 
+                        placeholder="Ej. Carcasa V2, Engrane..." 
+                        className="w-full bg-[#F7F5F0] border border-[#82C69E]/80 rounded-lg p-2 text-sm font-bold text-[#2B2B2B] focus:outline-none focus:ring-1 focus:ring-[#1B4D3E]" 
+                      />
+                    </div>
+                    <div className="flex flex-col gap-1">
+                      <label className="text-[10px] uppercase font-mono text-[#1B4D3E] font-bold">Piezas (Lote)</label>
+                      <input 
+                        type="number" 
+                        min="1" 
+                        step="1" 
+                        value={itemQuantity} 
+                        onChange={e => setItemQuantity(Math.max(1, parseInt(e.target.value) || 1))} 
+                        className="w-full bg-[#F7F5F0] border border-[#1B4D3E] rounded-lg p-2 text-sm font-extrabold text-[#1B4D3E] text-center focus:outline-none focus:ring-1 focus:ring-[#1B4D3E]" 
+                      />
+                    </div>
+                  </div>
                   
                   <div className="grid grid-cols-2 gap-3">
                     <div className="flex flex-col gap-1">
-                      <div className="flex justify-between items-center bg-[#F0FDF4] p-1 rounded">
-                        <label className="text-[10px] uppercase font-mono text-emerald-800 font-bold ml-1">Perfil / Material</label>
-                        <button type="button" onClick={() => setIsEditingProfiles(true)} className="bg-[#059669] text-white px-2 py-1 rounded text-[9px] uppercase font-mono font-bold hover:bg-emerald-800 transition-colors cursor-pointer">
+                      <div className="flex justify-between items-center bg-[#F7F5F0] p-1 rounded">
+                        <label className="text-[10px] uppercase font-mono text-[#1B4D3E] font-bold ml-1">Perfil / Material</label>
+                        <button 
+                          type="button" 
+                          onClick={() => setIsEditingProfiles(true)} 
+                          className="bg-[#1B4D3E] text-white px-2 py-0.5 rounded text-[9px] uppercase font-mono font-bold hover:bg-[#2E7D32] transition-colors cursor-pointer"
+                        >
                           <Settings size={10} className="inline mr-1" /> Editar
                         </button>
                       </div>
                       
-                      <select value={profileId} onChange={e=>setProfileId(e.target.value)} className="w-full bg-[#F0FDF4] border border-[#059669] rounded-lg p-2 text-sm font-bold text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#059669]">
+                      <select 
+                        value={profileId} 
+                        onChange={e => setProfileId(e.target.value)} 
+                        className="w-full bg-[#F7F5F0] border border-[#82C69E]/80 rounded-lg p-2 text-xs font-bold text-[#2B2B2B] focus:outline-none focus:ring-1 focus:ring-[#1B4D3E]"
+                      >
                         {profiles.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
                       </select>
                     </div>
+
                     <div className="flex flex-col gap-1">
-                      <label className="text-[10px] uppercase font-mono text-emerald-800 font-bold">Masa (g)</label>
-                      <input type="number" min="0" step="0.1" value={weight} onChange={e=>setWeight(Number(e.target.value))} placeholder="Ej. 150" className="w-full bg-[#F0FDF4] border border-[#059669] rounded-lg p-2 text-sm font-bold text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#059669]" />
+                      <label className="text-[10px] uppercase font-mono text-[#1B4D3E] font-bold">Masa Unit. (g)</label>
+                      <input 
+                        type="number" 
+                        min="0" 
+                        step="0.1" 
+                        value={weight} 
+                        onChange={e => setWeight(e.target.value === '' ? '' : Number(e.target.value))} 
+                        placeholder="Ej. 150" 
+                        className="w-full bg-[#F7F5F0] border border-[#82C69E]/80 rounded-lg p-2 text-sm font-bold text-[#2B2B2B] focus:outline-none focus:ring-1 focus:ring-[#1B4D3E]" 
+                      />
                     </div>
                   </div>
                   
                   <div className="grid grid-cols-2 gap-3">
                     <div className="flex flex-col gap-1">
-                      <label className="text-[10px] uppercase font-mono text-emerald-800 font-bold leading-tight" title="Tiempo Operativo Máquina (Horas)">T. Máquina (H)</label>
-                      <input type="number" min="0" step="0.1" value={hours} onChange={e=>setHours(Number(e.target.value))} placeholder="Ej. 5.5" className="w-full bg-[#F0FDF4] border border-[#059669] rounded-lg p-2 text-sm font-bold text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#059669]" />
+                      <label className="text-[10px] uppercase font-mono text-[#1B4D3E] font-bold leading-tight" title="Tiempo de máquina por pieza en horas">
+                        T. Máquina Unit. (H)
+                      </label>
+                      <input 
+                        type="number" 
+                        min="0" 
+                        step="0.1" 
+                        value={hours} 
+                        onChange={e => setHours(e.target.value === '' ? '' : Number(e.target.value))} 
+                        placeholder="Ej. 5.5" 
+                        className="w-full bg-[#F7F5F0] border border-[#82C69E]/80 rounded-lg p-2 text-sm font-bold text-[#2B2B2B] focus:outline-none focus:ring-1 focus:ring-[#1B4D3E]" 
+                      />
                     </div>
                     <div className="flex flex-col gap-1">
-                      <label className="text-[10px] uppercase font-mono text-emerald-800 font-bold leading-tight" title="Mano de obra o costos fijos para esta pieza">Mano de obra ($)</label>
-                      <input type="number" min="0" step="1" value={pieceLabor} onChange={e=>setPieceLabor(Number(e.target.value))} placeholder="Ej. 50" className="w-full bg-[#F0FDF4] border border-[#059669] rounded-lg p-2 text-sm font-bold text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#059669]" />
+                      <label className="text-[10px] uppercase font-mono text-[#1B4D3E] font-bold leading-tight" title="Mano de obra o preparación para esta pieza">
+                        Mano de Obra ($)
+                      </label>
+                      <input 
+                        type="number" 
+                        min="0" 
+                        step="1" 
+                        value={pieceLabor} 
+                        onChange={e => setPieceLabor(e.target.value === '' ? '' : Number(e.target.value))} 
+                        placeholder="Ej. 50" 
+                        className="w-full bg-[#F7F5F0] border border-[#82C69E]/80 rounded-lg p-2 text-sm font-bold text-[#2B2B2B] focus:outline-none focus:ring-1 focus:ring-[#1B4D3E]" 
+                      />
                     </div>
                   </div>
 
-                  <div className="flex items-center justify-between text-xs font-bold text-emerald-800 bg-emerald-50 px-3 py-2 rounded-lg border border-[#A7F3D0] mt-1 shadow-sm">
-                    <span className="uppercase tracking-widest font-mono text-[9px] opacity-70">Costo Base</span>
-                    <span className="font-mono text-base">{livePiecePrice > 0 ? formatMXN(livePiecePrice / (1 + globalMargin / 100)) : '$ 0.00'}</span>
+                  {/* Resumen dinámico en vivo considerando la cantidad */}
+                  <div className="flex items-center justify-between text-xs font-bold text-[#1B4D3E] bg-[#F0FDF4] px-3 py-2 rounded-lg border border-[#82C69E] mt-1">
+                    <div className="flex flex-col">
+                      <span className="uppercase tracking-widest font-mono text-[9px] text-gray-500">
+                        Total {itemQuantity} {itemQuantity === 1 ? 'Pieza' : 'Piezas'}
+                      </span>
+                      <span className="font-mono text-[11px] text-[#2E7D32]">
+                        Unitario: {livePiecePrice > 0 ? formatMXN(livePiecePrice) : '$ 0.00'}
+                      </span>
+                    </div>
+                    <div className="text-right">
+                      <span className="uppercase tracking-widest font-mono text-[9px] text-gray-500 block">Subtotal Lote</span>
+                      <span className="font-mono text-base font-black text-[#1B4D3E]">
+                        {livePiecePrice > 0 ? formatMXN(livePiecePrice * itemQuantity) : '$ 0.00'}
+                      </span>
+                    </div>
                   </div>
 
                   {editItemId && ticketItems.find(i => i.id === editItemId)?.itemType !== 'hardware' ? (
-                    <div className="grid grid-cols-2 gap-2 mt-2">
-                      <button type="submit" disabled={!itemName || weight==='' || hours===''} className="w-full bg-[#059669] text-white py-3 rounded-xl font-bold uppercase tracking-widest text-xs flex items-center justify-center gap-2 hover:bg-emerald-800 active:scale-[0.98] transition-all disabled:opacity-50">
-                        <Check size={16}/> Guardar Cambios
+                    <div className="grid grid-cols-2 gap-2 mt-1">
+                      <button 
+                        type="submit" 
+                        disabled={!itemName || weight === '' || hours === ''} 
+                        className="w-full bg-[#1B4D3E] text-white py-2.5 rounded-xl font-bold uppercase tracking-widest text-xs flex items-center justify-center gap-2 hover:bg-[#2E7D32] transition-all disabled:opacity-50"
+                      >
+                        <Check size={15}/> Guardar Cambios
                       </button>
-                      <button type="button" onClick={cancelEdit} className="w-full bg-white border border-[#059669] text-[#059669] py-3 rounded-xl font-bold uppercase tracking-widest text-xs flex items-center justify-center gap-2 hover:bg-[#F0FDF4] active:scale-[0.98] transition-all">
-                        <X size={16}/> Cancelar
+                      <button 
+                        type="button" 
+                        onClick={cancelEdit} 
+                        className="w-full bg-white border border-[#1B4D3E] text-[#1B4D3E] py-2.5 rounded-xl font-bold uppercase tracking-widest text-xs flex items-center justify-center gap-2 hover:bg-[#F7F5F0] transition-all"
+                      >
+                        <X size={15}/> Cancelar
                       </button>
                     </div>
                   ) : (
-                    <button type="submit" disabled={!itemName || weight==='' || hours===''} className="mt-2 w-full bg-[#059669] text-white py-3 rounded-xl font-bold uppercase tracking-widest text-xs flex items-center justify-center gap-2 hover:bg-emerald-800 active:scale-[0.98] transition-all disabled:opacity-50 disabled:active:scale-100 shadow-md">
-                      <Plus size={16}/> Añadir al Ticket
+                    <button 
+                      type="submit" 
+                      disabled={!itemName || weight === '' || hours === ''} 
+                      className="mt-1 w-full bg-[#1B4D3E] text-white py-3 rounded-xl font-bold uppercase tracking-widest text-xs flex items-center justify-center gap-2 hover:bg-[#2E7D32] active:scale-[0.99] transition-all disabled:opacity-50 shadow-sm"
+                    >
+                      <Plus size={16}/> Añadir {itemQuantity > 1 ? `${itemQuantity} Piezas` : 'al Ticket'}
                     </button>
                   )}
                 </form>
 
-                {/* Accesorios / Hardware */}
-                <form onSubmit={handleAddHardware} className="bg-[#F0FDF4] p-5 rounded-2xl border border-[#A7F3D0] shadow-sm flex flex-col gap-4">
-                  <h3 className="text-xs uppercase font-bold text-gray-900 flex items-center gap-2 mb-1"><Cpu size={14}/> Insumos Extra (Hardware)</h3>
-                  <p className="text-[10px] leading-tight text-emerald-800/70">Tornillería, insertos térmicos, rodamientos, o cualquier elemento no impreso.</p>
+                {/* Accesorios / Hardware con soporte de cantidad */}
+                <form onSubmit={handleAddHardware} className="bg-white p-5 rounded-2xl border border-[#82C69E]/60 shadow-sm flex flex-col gap-3">
+                  <h3 className="text-xs uppercase font-bold text-[#1B4D3E] flex items-center gap-2">
+                    <Cpu size={15}/> Insumos Extra (Hardware)
+                  </h3>
+                  <p className="text-[10px] leading-tight text-gray-500">
+                    Tornillería, insertos térmicos, empaques o componentes no impresos.
+                  </p>
                   
-                  <div className="grid grid-cols-3 gap-3">
-                    <input type="text" value={hwName} onChange={e=>setHwName(e.target.value)} placeholder="Tornillos M3..." className="col-span-2 bg-white border border-[#A7F3D0] rounded-lg p-2 text-sm font-bold text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#059669]" />
-                    <input type="number" min="0" step="1" value={hwPrice} onChange={e=>setHwPrice(Number(e.target.value))} placeholder="$ 0.00" className="bg-white border border-[#A7F3D0] rounded-lg p-2 text-sm font-bold text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#059669]" />
+                  <div className="grid grid-cols-4 gap-2">
+                    <input 
+                      type="text" 
+                      value={hwName} 
+                      onChange={e => setHwName(e.target.value)} 
+                      placeholder="Ej. Insertos M3..." 
+                      className="col-span-2 bg-[#F7F5F0] border border-[#82C69E]/80 rounded-lg p-2 text-xs font-bold text-[#2B2B2B] focus:outline-none focus:ring-1 focus:ring-[#1B4D3E]" 
+                    />
+                    <input 
+                      type="number" 
+                      min="1" 
+                      step="1" 
+                      value={hwQuantity} 
+                      onChange={e => setHwQuantity(Math.max(1, parseInt(e.target.value) || 1))} 
+                      title="Cantidad"
+                      placeholder="Cant."
+                      className="bg-[#F7F5F0] border border-[#82C69E]/80 rounded-lg p-2 text-xs font-bold text-center text-[#1B4D3E] focus:outline-none focus:ring-1 focus:ring-[#1B4D3E]" 
+                    />
+                    <input 
+                      type="number" 
+                      min="0" 
+                      step="any" 
+                      value={hwPrice} 
+                      onChange={e => setHwPrice(e.target.value === '' ? '' : Number(e.target.value))} 
+                      placeholder="$ Unit." 
+                      className="bg-[#F7F5F0] border border-[#82C69E]/80 rounded-lg p-2 text-xs font-bold text-[#2B2B2B] focus:outline-none focus:ring-1 focus:ring-[#1B4D3E]" 
+                    />
                   </div>
 
-                  <div className="flex items-center justify-between text-xs font-bold text-emerald-800 bg-emerald-50 px-3 py-2 rounded-lg border border-[#A7F3D0] mt-1 shadow-sm">
-                    <span className="uppercase tracking-widest font-mono text-[9px] opacity-70">Precio Insumo</span>
-                    <span className="font-mono text-base">{Number(hwPrice) > 0 ? formatMXN(Number(hwPrice)) : '$ 0.00'}</span>
-                  </div>
-                  
                   {editItemId && ticketItems.find(i => i.id === editItemId)?.itemType === 'hardware' ? (
-                    <div className="grid grid-cols-2 gap-2 mt-2">
-                       <button type="submit" disabled={!hwName || hwPrice===''} className="w-full bg-[#059669] text-white py-2 rounded-xl font-bold uppercase tracking-widest text-xs flex items-center justify-center gap-2 hover:bg-emerald-800 active:scale-[0.98] transition-all disabled:opacity-50">
-                          <Check size={16}/> Guardar Cambios
-                       </button>
-                       <button type="button" onClick={cancelEdit} className="w-full bg-white border border-[#059669] text-[#059669] py-2 rounded-xl font-bold uppercase tracking-widest text-xs flex items-center justify-center gap-2 hover:bg-[#F0FDF4] active:scale-[0.98] transition-all">
-                          <X size={16}/> Cancelar
-                       </button>
+                    <div className="grid grid-cols-2 gap-2 mt-1">
+                      <button 
+                        type="submit" 
+                        disabled={!hwName || hwPrice === ''} 
+                        className="w-full bg-[#1B4D3E] text-white py-2 rounded-xl font-bold uppercase tracking-widest text-xs flex items-center justify-center gap-1 hover:bg-[#2E7D32]"
+                      >
+                        <Check size={14}/> Guardar
+                      </button>
+                      <button 
+                        type="button" 
+                        onClick={cancelEdit} 
+                        className="w-full bg-white border border-[#1B4D3E] text-[#1B4D3E] py-2 rounded-xl font-bold uppercase tracking-widest text-xs flex items-center justify-center gap-1"
+                      >
+                        <X size={14}/> Cancelar
+                      </button>
                     </div>
                   ) : (
-                    <button type="submit" disabled={!hwName || hwPrice===''} className="w-full bg-white border-2 border-[#059669] text-emerald-800 py-2 rounded-xl font-bold uppercase tracking-widest text-xs flex items-center justify-center gap-2 hover:bg-[#D1FAE5] active:scale-[0.98] transition-all disabled:opacity-50">
-                      <Plus size={16}/> Añadir Insumo
+                    <button 
+                      type="submit" 
+                      disabled={!hwName || hwPrice === ''} 
+                      className="w-full bg-white border border-[#1B4D3E] text-[#1B4D3E] py-2 rounded-xl font-bold uppercase tracking-widest text-xs flex items-center justify-center gap-2 hover:bg-[#F0FDF4] transition-all disabled:opacity-50"
+                    >
+                      <Plus size={14}/> Añadir Insumo
                     </button>
                   )}
                 </form>
 
-             </div>
+              </div>
 
-             {/* Right Col: Ticket / View */}
-             <div className="md:col-span-7 xl:col-span-8 flex flex-col bg-white border-2 border-[#A7F3D0] rounded-2xl shadow-xl overflow-hidden relative pb-4">
-                <div className="bg-[#059669] text-white p-4 flex justify-between items-center shrink-0">
-                  <h2 className="font-bold text-sm tracking-widest uppercase flex items-center gap-2"><FileText size={16}/> Cotización en curso</h2>
-                  {savedQuoteId && <span className="bg-[#064e3b] text-[10px] px-3 py-1 rounded-full uppercase tracking-wider font-mono shadow-inner shadow-black/20">Borrador Guardado</span>}
+              {/* Right Col: Ticket / En Curso con Selector de Piezas */}
+              <div className="md:col-span-7 xl:col-span-8 flex flex-col bg-white border border-[#82C69E]/70 rounded-2xl shadow-sm overflow-hidden relative pb-4">
+                
+                {/* Header del Ticket */}
+                <div className="bg-[#1B4D3E] text-white p-4 flex justify-between items-center shrink-0">
+                  <div className="flex items-center gap-2">
+                    <FileText size={16}/>
+                    <h2 className="font-bold text-sm tracking-widest uppercase">Cotización en Curso</h2>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {ticketItems.length > 0 && (
+                      <button
+                        onClick={handleClear}
+                        className="text-xs text-red-200 hover:text-white flex items-center gap-1 px-2 py-1 rounded bg-black/20 hover:bg-black/30 transition-colors"
+                        title="Limpiar ticket actual"
+                      >
+                        <RotateCcw size={12} /> Limpiar
+                      </button>
+                    )}
+                    {savedQuoteId && (
+                      <span className="bg-[#82C69E] text-[#1B4D3E] text-[10px] font-bold px-2.5 py-0.5 rounded-full uppercase tracking-wider font-mono">
+                        Borrador Sincronizado
+                      </span>
+                    )}
+                  </div>
                 </div>
 
-                <div className="flex-1 overflow-y-auto p-4 lg:p-6 bg-[#F0FDF4] bg-opacity-30">
-                   {ticketItems.length === 0 ? (
-                      <div className="h-full flex flex-col justify-center items-center opacity-30 gap-4 text-[#064e3b]">
-                        <FileText size={48} strokeWidth={1} />
-                        <span className="font-mono uppercase tracking-widest text-xs text-center leading-relaxed">El ticket está vacío<br/>Comienza a añadir piezas.</span>
-                      </div>
-                   ) : (
-                      <div className="flex flex-col gap-3">
-                         {ticketItems.map((item, i) => (
-                           <div key={item.id} className="bg-white/90 backdrop-blur-sm border border-[#A7F3D0] rounded-xl p-4 flex items-center justify-between shadow-sm group hover:border-[#059669] transition-colors relative overflow-hidden">
-                              <div className={`absolute top-0 left-0 bottom-0 w-1 ${item.itemType === 'hardware' ? 'bg-[#064e3b]' : 'bg-[#10B981]'}`}></div>
-                              
-                              <div className="flex flex-col pl-3">
-                                 <span className="font-bold text-[#064e3b] text-base">{item.itemName}</span>
-                                 <span className="text-[10px] font-mono text-emerald-800 uppercase font-bold mt-0.5">
-                                    {item.itemType === 'hardware' ? 'Hardware Adicional' : `${item.profileName} — ${item.weightInfo}g / ${item.timeInfo}h`}
-                                 </span>
-                              </div>
-
-                              <div className="flex items-center gap-2 lg:gap-4">
-                                 <div className="text-right flex flex-col mr-2">
-                                   <span className="text-[9px] uppercase font-mono text-[#064e3b] opacity-50">Precio Final</span>
-                                   <span className="font-black text-lg text-emerald-800">{formatMXN(item.totalPrice)}</span>
-                                 </div>
-                                 <button onClick={() => handleEditItemInfo(item)} className="text-emerald-600 opacity-20 group-hover:opacity-100 p-2 hover:bg-emerald-50 rounded transition-all" title="Editar">
-                                   <Settings size={16} />
-                                 </button>
-                                 <button onClick={() => setTicketItems(ticketItems.filter((_, idx)=>idx!==i))} className="text-red-400 opacity-20 group-hover:opacity-100 p-2 hover:bg-red-50 rounded transition-all" title="Eliminar">
-                                   <Trash2 size={16} />
-                                 </button>
-                              </div>
-                           </div>
-                         ))}
-                      </div>
-                   )}
-                </div>
-
-                <div className="shrink-0 p-4 lg:p-6 bg-white border-t border-[#A7F3D0]">
-                   
-                   <div className="flex flex-col gap-2 mb-6">
-                     <div className="flex justify-between items-center bg-gray-50 p-2 px-3 rounded-lg border border-gray-100">
-                       <span className="uppercase font-mono text-[10px] font-bold text-gray-500 tracking-widest">Inversión (Costo Base)</span>
-                       <span className="font-mono text-sm font-bold text-gray-800">{formatMXN(lgCosts)}</span>
-                     </div>
-                     <div className="flex justify-between items-center bg-emerald-50 p-2 px-3 rounded-lg border border-[#A7F3D0]">
-                       <div className="flex items-center gap-2">
-                         <span className="uppercase font-mono text-[10px] font-bold text-emerald-800 tracking-widest opacity-80">Margen Global</span>
-                         <div className="flex items-center bg-white border border-[#34D399] rounded px-1">
-                           <input type="number" min="0" step="1" value={globalMargin} onChange={e=>setGlobalMargin(Number(e.target.value))} className="w-12 text-center text-xs font-bold text-emerald-900 focus:outline-none" />
-                           <span className="text-xs text-emerald-800 font-bold">%</span>
-                         </div>
-                       </div>
-                       <span className="font-mono text-sm font-bold text-emerald-700">+{formatMXN(lgProfit)}</span>
-                     </div>
-                   </div>
-
-                   <div className="flex justify-between items-end mb-4">
-                     <span className="uppercase font-mono text-xs font-bold text-[#064e3b] opacity-50 tracking-widest">Precio de Venta</span>
-                     <span className="text-3xl lg:text-5xl font-black text-[#064e3b] tracking-tighter">{formatMXN(lgTotals)}</span>
-                   </div>
-                   
-                   <div className="flex gap-2">
-                     <button onClick={handleSave} disabled={ticketItems.length === 0} className="flex-1 bg-[#064e3b] text-white py-3 rounded-xl font-bold uppercase tracking-widest text-xs flex items-center justify-center gap-2 hover:bg-[#059669] transition-colors disabled:opacity-50">
-                        <Save size={16}/> Guardar Ticket
-                     </button>
-                   </div>
-                </div>
-             </div>
-
-          </div>
-        )}
-      </main>
-      {/* Modal para Editar Perfiles */}
-      {isEditingProfiles && (
-        <div className="fixed inset-0 bg-gray-900/40 backdrop-blur-sm z-[999] flex justify-center items-center p-4">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg border-t-4 border-[#059669] overflow-hidden flex flex-col max-h-full">
-            <div className="p-4 bg-[#F0FDF4] border-b border-[#A7F3D0] flex justify-between items-center shrink-0">
-               <h3 className="font-bold text-gray-900 uppercase tracking-wider text-sm flex items-center gap-2">
-                 <Settings size={18} className="text-[#059669]"/> Editar Perfiles de Material
-               </h3>
-               <button onClick={() => setIsEditingProfiles(false)} className="text-gray-500 hover:text-red-500 p-1"><X size={20}/></button>
-            </div>
-            
-            <div className="p-6 overflow-y-auto flex-1 flex flex-col gap-4">
-                <span className="text-xs font-bold text-gray-800 uppercase tracking-widest opacity-60">Perfiles Registrados</span>
-                <div className="flex flex-col gap-2">
-                  {profiles.map(p => (
-                    <div key={p.id} className={`flex flex-col gap-2 ${profileEditingId === p.id ? 'bg-[#ECFDF5] border-[#059669]' : 'bg-gray-50 border-gray-200'} border p-3 rounded-xl shadow-sm hover:border-[#A7F3D0] transition-colors`}>
-                      {profileEditingId === p.id ? (
-                        <div className="flex flex-col gap-3">
-                           <input type="text" value={editProfileInput.name} onChange={e => setEditProfileInput({...editProfileInput, name: e.target.value})} placeholder="Nombre" className="bg-white border border-[#A7F3D0] rounded p-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#059669] font-bold text-gray-900" />
-                           <div className="grid grid-cols-3 gap-2">
-                             <div className="flex flex-col gap-1">
-                               <label className="text-[9px] uppercase font-bold text-emerald-800">Material (g)</label>
-                               <input type="number" step="0.01" value={editProfileInput.materialCost} onChange={e => setEditProfileInput({...editProfileInput, materialCost: e.target.value})} className="bg-white border border-[#A7F3D0] rounded p-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#059669]" />
-                             </div>
-                             <div className="flex flex-col gap-1">
-                               <label className="text-[9px] uppercase font-bold text-emerald-800">Máquina (h)</label>
-                               <input type="number" step="0.1" value={editProfileInput.machineHour} onChange={e => setEditProfileInput({...editProfileInput, machineHour: e.target.value})} className="bg-white border border-[#A7F3D0] rounded p-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#059669]" />
-                             </div>
-                             <div className="flex flex-col gap-1">
-                               <label className="text-[9px] uppercase font-bold text-emerald-800">Margen (%)</label>
-                               <input type="number" step="1" value={editProfileInput.defaultMargin} onChange={e => setEditProfileInput({...editProfileInput, defaultMargin: e.target.value})} className="bg-white border border-[#A7F3D0] rounded p-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#059669]" />
-                             </div>
-                           </div>
-                           <div className="flex items-center gap-2 mt-1">
-                              <button type="button" onClick={handleUpdateProfile} className="flex-1 bg-[#059669] text-white p-2 text-xs rounded-lg uppercase font-bold hover:bg-emerald-800 transition-colors flex justify-center items-center gap-2">
-                                <Check size={14} /> Guardar
-                              </button>
-                              <button type="button" onClick={() => setProfileEditingId(null)} className="flex-1 bg-white border border-[#059669] text-emerald-800 p-2 text-xs rounded-lg uppercase font-bold hover:bg-[#F0FDF4] transition-colors flex justify-center items-center gap-2">
-                                <X size={14} /> Cancelar
-                              </button>
-                           </div>
-                        </div>
-                      ) : (
-                        <div className="flex justify-between items-center">
-                          <div className="flex flex-col">
-                            <span className="text-sm font-bold text-gray-900">{p.name}</span>
-                            <span className="text-[10px] font-mono font-normal opacity-70 mt-1">
-                               ${p.spoolCost}/kg | ${p.machineHour}/h
+                {/* Lista de Partidas */}
+                <div className="flex-1 overflow-y-auto p-4 lg:p-6 bg-[#F7F5F0]/40 min-h-[350px]">
+                  {ticketItems.length === 0 ? (
+                    <div className="h-full flex flex-col justify-center items-center opacity-40 gap-3 py-16 text-[#1B4D3E]">
+                      <FileText size={48} strokeWidth={1} />
+                      <span className="font-mono uppercase tracking-widest text-xs text-center leading-relaxed">
+                        El ticket está vacío.<br/>Captura piezas o componentes a la izquierda.
+                      </span>
+                    </div>
+                  ) : (
+                    <div className="flex flex-col gap-3">
+                      {ticketItems.map((item) => (
+                        <div 
+                          key={item.id} 
+                          className="bg-white border border-[#82C69E]/40 rounded-xl p-3.5 flex flex-wrap sm:flex-nowrap items-center justify-between gap-3 shadow-xs hover:border-[#1B4D3E] transition-colors relative overflow-hidden"
+                        >
+                          <div className={`absolute top-0 left-0 bottom-0 w-1.5 ${item.itemType === 'hardware' ? 'bg-[#2E7D32]' : 'bg-[#1B4D3E]'}`}></div>
+                          
+                          {/* Datos de la pieza */}
+                          <div className="flex flex-col pl-2 flex-1 min-w-[180px]">
+                            <span className="font-bold text-[#1B4D3E] text-sm sm:text-base">{item.itemName}</span>
+                            <span className="text-[10px] font-mono text-gray-500 uppercase mt-0.5">
+                              {item.itemType === 'hardware' 
+                                ? 'Hardware Adicional' 
+                                : `${item.profileName} · ${item.weightInfo}g · ${item.timeInfo}h`
+                              }
                             </span>
                           </div>
-                          <div className="flex items-center gap-2">
-                            <button type="button" onClick={() => startEditProfile(p)} className="text-emerald-600 bg-emerald-50 p-2 rounded opacity-80 hover:opacity-100 transition-opacity" title="Editar"><Settings size={16}/></button>
-                            <button type="button" onClick={() => handleRemoveProfile(p.id)} className="text-red-500 bg-red-50 p-2 rounded opacity-80 hover:opacity-100 transition-opacity" title="Eliminar"><Trash2 size={16}/></button>
+
+                          {/* Control de Cantidad (Stepper en vivo) */}
+                          <div className="flex items-center gap-1.5 bg-[#F7F5F0] px-2 py-1 rounded-lg border border-gray-200">
+                            <span className="text-[10px] font-mono text-gray-500 uppercase font-semibold mr-1">Piezas:</span>
+                            <button
+                              type="button"
+                              onClick={() => updateItemQuantity(item.id, (item.quantity || 1) - 1)}
+                              disabled={(item.quantity || 1) <= 1}
+                              className="w-6 h-6 flex items-center justify-center rounded bg-white border border-gray-300 text-gray-700 hover:bg-[#82C69E]/20 disabled:opacity-30 disabled:pointer-events-none"
+                              title="Restar pieza"
+                            >
+                              <Minus size={12} />
+                            </button>
+                            
+                            <input
+                              type="number"
+                              min="1"
+                              step="1"
+                              value={item.quantity || 1}
+                              onChange={(e) => updateItemQuantity(item.id, parseInt(e.target.value) || 1)}
+                              className="w-12 text-center text-xs font-bold text-[#1B4D3E] bg-white border border-gray-300 rounded py-0.5 focus:outline-none focus:ring-1 focus:ring-[#1B4D3E]"
+                            />
+
+                            <button
+                              type="button"
+                              onClick={() => updateItemQuantity(item.id, (item.quantity || 1) + 1)}
+                              className="w-6 h-6 flex items-center justify-center rounded bg-white border border-gray-300 text-gray-700 hover:bg-[#82C69E]/20"
+                              title="Sumar pieza"
+                            >
+                              <Plus size={12} />
+                            </button>
+                          </div>
+
+                          {/* Precios e importes */}
+                          <div className="flex items-center gap-3">
+                            <div className="text-right flex flex-col min-w-[90px]">
+                              <span className="text-[9px] uppercase font-mono text-gray-400">
+                                {formatMXN(item.unitPrice)} c/u
+                              </span>
+                              <span className="font-extrabold text-base text-[#1B4D3E]">
+                                {formatMXN(item.totalPrice)}
+                              </span>
+                            </div>
+
+                            <button 
+                              onClick={() => handleEditItemInfo(item)} 
+                              className="text-gray-400 hover:text-[#1B4D3E] p-1.5 hover:bg-[#F7F5F0] rounded transition-colors" 
+                              title="Editar especificaciones"
+                            >
+                              <Settings size={15} />
+                            </button>
+                            <button 
+                              onClick={() => setTicketItems(ticketItems.filter(i => i.id !== item.id))} 
+                              className="text-gray-400 hover:text-red-600 p-1.5 hover:bg-red-50 rounded transition-colors" 
+                              title="Eliminar partida"
+                            >
+                              <Trash2 size={15} />
+                            </button>
                           </div>
                         </div>
-                      )}
+                      ))}
                     </div>
-                  ))}
+                  )}
                 </div>
-                
-                <hr className="my-2 border-gray-200" />
-                
-                <span className="text-xs font-bold text-gray-800 uppercase tracking-widest opacity-60">Crear Nuevo Perfil</span>
-                <div className="flex flex-col gap-3 bg-[#F0FDF4] p-4 rounded-xl border border-[#A7F3D0]">
-                   <input type="text" value={newProfileInput.name} onChange={e => setNewProfileInput({...newProfileInput, name: e.target.value})} placeholder="Nombre (Ej. ABS Industrial)" className="bg-white border border-[#A7F3D0] rounded p-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#059669] font-bold text-gray-900" />
-                   <div className="grid grid-cols-3 gap-2">
-                     <div className="flex flex-col gap-1">
-                       <label className="text-[9px] uppercase font-bold text-emerald-800">Costo Material (g)</label>
-                       <input type="number" step="0.01" value={newProfileInput.materialCost} onChange={e => setNewProfileInput({...newProfileInput, materialCost: e.target.value})} placeholder="$ / gramo" className="bg-white border border-[#A7F3D0] rounded p-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#059669]" />
-                     </div>
-                     <div className="flex flex-col gap-1">
-                       <label className="text-[9px] uppercase font-bold text-emerald-800">Costo Máquina (h)</label>
-                       <input type="number" step="0.1" value={newProfileInput.machineHour} onChange={e => setNewProfileInput({...newProfileInput, machineHour: e.target.value})} placeholder="$ / hr" className="bg-white border border-[#A7F3D0] rounded p-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#059669]" />
-                     </div>
-                     <div className="flex flex-col gap-1">
-                       <label className="text-[9px] uppercase font-bold text-emerald-800">Margen Defecto (%)</label>
-                       <input type="number" step="1" value={newProfileInput.defaultMargin} onChange={e => setNewProfileInput({...newProfileInput, defaultMargin: e.target.value})} placeholder="% Margen" className="bg-white border border-[#A7F3D0] rounded p-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#059669]" />
-                     </div>
-                   </div>
-                   <button type="button" onClick={handleAddProfile} className="mt-2 bg-[#059669] text-white p-2 text-sm rounded-lg uppercase tracking-wider font-bold hover:bg-[#064E3B] flex items-center justify-center gap-2 cursor-pointer shadow">
-                      <Plus size={16}/> Guardar Perfil
-                   </button>
+
+                {/* Footer del Ticket: Totales y Botones de Acción */}
+                <div className="shrink-0 p-4 lg:p-6 bg-white border-t border-[#82C69E]/40">
+                  
+                  {/* Desglose de Inversión vs Margen */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-5">
+                    <div className="flex justify-between items-center bg-[#F7F5F0] p-2.5 px-3 rounded-xl border border-gray-200">
+                      <span className="uppercase font-mono text-[10px] font-bold text-gray-500 tracking-wider">
+                        Inversión de Taller (Costo)
+                      </span>
+                      <span className="font-mono text-sm font-bold text-gray-700">{formatMXN(lgCosts)}</span>
+                    </div>
+
+                    <div className="flex justify-between items-center bg-[#F0FDF4] p-2.5 px-3 rounded-xl border border-[#82C69E]">
+                      <div className="flex items-center gap-2">
+                        <span className="uppercase font-mono text-[10px] font-bold text-[#1B4D3E] tracking-wider">
+                          Margen de Ganancia
+                        </span>
+                        <div className="flex items-center bg-white border border-[#2E7D32] rounded px-1.5 py-0.5">
+                          <input 
+                            type="number" 
+                            min="0" 
+                            step="1" 
+                            value={globalMargin} 
+                            onChange={e => setGlobalMargin(Number(e.target.value))} 
+                            className="w-10 text-center text-xs font-bold text-[#1B4D3E] focus:outline-none" 
+                          />
+                          <span className="text-xs text-[#2E7D32] font-bold">%</span>
+                        </div>
+                      </div>
+                      <span className="font-mono text-sm font-bold text-[#2E7D32]">+{formatMXN(lgProfit)}</span>
+                    </div>
+                  </div>
+
+                  {/* Total de Venta */}
+                  <div className="flex justify-between items-baseline mb-5 pb-3 border-b border-gray-100">
+                    <span className="uppercase font-mono text-xs font-bold text-gray-500 tracking-wider">
+                      Importe Total de Venta
+                    </span>
+                    <span className="text-3xl lg:text-4xl font-extrabold text-[#1B4D3E] tracking-tight">
+                      {formatMXN(lgTotals)} <span className="text-xs font-mono font-normal text-gray-400">MXN</span>
+                    </span>
+                  </div>
+                  
+                  {/* Botones de acción */}
+                  <div className="flex flex-col gap-3">
+                    <button 
+                      onClick={handleSave} 
+                      disabled={ticketItems.length === 0} 
+                      className="w-full bg-[#1B4D3E] text-white py-3 rounded-xl font-bold uppercase tracking-widest text-xs flex items-center justify-center gap-2 hover:bg-[#2E7D32] transition-colors disabled:opacity-40 cursor-pointer shadow-sm"
+                    >
+                      <Save size={15}/> Guardar Cotización
+                    </button>
+
+                    <div className="p-3 bg-[#F7F5F0] rounded-xl border border-[#82C69E]/50 flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2 text-[#1B4D3E]">
+                        <Share2 size={14} className="text-[#2E7D32]" />
+                        <span className="text-[10px] uppercase font-mono font-bold tracking-wider">Exportar & Compartir</span>
+                      </div>
+                      
+                      <div className="flex items-center gap-2">
+                        <button 
+                          type="button"
+                          onClick={handleGenerateLocalPDF}
+                          disabled={ticketItems.length === 0}
+                          className="bg-white border border-[#1B4D3E] text-[#1B4D3E] py-1.5 px-3 rounded-lg font-bold text-xs uppercase tracking-wider flex items-center gap-1.5 hover:bg-[#F0FDF4] transition-colors disabled:opacity-40"
+                        >
+                          <FileText size={13} /> PDF
+                        </button>
+
+                        <button 
+                          type="button"
+                          onClick={() => setShowPresetsModal(true)}
+                          disabled={ticketItems.length === 0}
+                          className="bg-[#2E7D32] text-white py-1.5 px-3 rounded-lg font-bold text-xs uppercase tracking-wider flex items-center gap-1.5 hover:bg-[#1B4D3E] transition-colors disabled:opacity-40"
+                        >
+                          <MessageSquare size={13} /> WhatsApp
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
                 </div>
+
+              </div>
+
+            </div>
+          </>
+        )}
+
+      </main>
+
+      {/* Modal de Presets de Mensajes de WhatsApp */}
+      {showPresetsModal && (
+        <MessagePresetsModal 
+          isOpen={showPresetsModal}
+          onClose={() => setShowPresetsModal(false)}
+          quote={{
+            id: savedQuoteId || 'BORRADOR',
+            folio: savedQuoteId ? (quotes.find(q => q.id === savedQuoteId)?.folio || 'CUB-NUEVO') : 'CUB-NUEVO',
+            clientName: clientName || 'Cliente',
+            operatorName: operatorName || 'Asesor Técnico',
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+            status: 'borrador',
+            statusHistory: [],
+            total: lgTotals,
+            items: ticketItems,
+            globalMargin,
+            notes: '',
+            isArchived: false
+          }}
+        />
+      )}
+
+      {/* Modal de Edición de Perfiles de Material */}
+      {isEditingProfiles && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-xs z-50 flex items-center justify-center p-4">
+          <div className="bg-white border border-[#82C69E] w-full max-w-lg rounded-2xl shadow-xl p-6 flex flex-col gap-4 text-[#2B2B2B]">
+            <div className="flex justify-between items-center border-b border-gray-100 pb-3">
+              <h3 className="font-bold text-base text-[#1B4D3E] flex items-center gap-2">
+                <Settings size={18} /> Configuración de Materiales y Tarifas
+              </h3>
+              <button 
+                onClick={() => setIsEditingProfiles(false)}
+                className="text-gray-400 hover:text-gray-700 p-1 rounded-lg"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="max-h-60 overflow-y-auto flex flex-col gap-2">
+              {profiles.map(p => (
+                <div key={p.id} className="flex justify-between items-center p-2.5 bg-[#F7F5F0] rounded-xl border border-gray-200">
+                  <div>
+                    <span className="font-bold text-xs text-[#1B4D3E] block">{p.name}</span>
+                    <span className="text-[10px] font-mono text-gray-500">
+                      Filamento: ${p.spoolCost}/kg · Máquina: ${p.machineHour}/h
+                    </span>
+                  </div>
+                  {profiles.length > 1 && (
+                    <button 
+                      onClick={() => handleRemoveProfile(p.id)}
+                      className="text-gray-400 hover:text-red-600 p-1 rounded"
+                      title="Eliminar perfil"
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+
+            <div className="bg-[#F0FDF4] p-3.5 rounded-xl border border-[#82C69E]/50 flex flex-col gap-2">
+              <span className="text-xs font-bold text-[#1B4D3E]">Agregar Nuevo Perfil</span>
+              <input 
+                type="text" 
+                placeholder="Nombre (ej. Nylon Fibra de Carbono)" 
+                value={newProfileName} 
+                onChange={e => setNewProfileName(e.target.value)}
+                className="bg-white border border-gray-300 rounded-lg p-2 text-xs font-medium focus:outline-none"
+              />
+              <div className="grid grid-cols-2 gap-2">
+                <input 
+                  type="number" 
+                  placeholder="Costo Bobina ($/kg)" 
+                  value={newProfileSpool} 
+                  onChange={e => setNewProfileSpool(e.target.value === '' ? '' : Number(e.target.value))}
+                  className="bg-white border border-gray-300 rounded-lg p-2 text-xs font-medium focus:outline-none"
+                />
+                <input 
+                  type="number" 
+                  placeholder="Costo Hora ($/h)" 
+                  value={newProfileHour} 
+                  onChange={e => setNewProfileHour(e.target.value === '' ? '' : Number(e.target.value))}
+                  className="bg-white border border-gray-300 rounded-lg p-2 text-xs font-medium focus:outline-none"
+                />
+              </div>
+              <button 
+                onClick={handleAddProfile}
+                className="bg-[#1B4D3E] hover:bg-[#2E7D32] text-white py-2 rounded-lg text-xs font-bold transition-colors mt-1"
+              >
+                Guardar Perfil
+              </button>
             </div>
           </div>
         </div>
@@ -675,7 +1085,4 @@ function MainApp() {
     </div>
   );
 }
-
-export default function App() {
-  return <MainApp />;
-}
+export default App;
