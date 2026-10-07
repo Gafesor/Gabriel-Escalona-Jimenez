@@ -11,6 +11,8 @@ import {
   getDoc,
   runTransaction 
 } from 'firebase/firestore';
+import { DesgloseCostoLote } from '../lib/pricing';
+import { TallerConfig } from '../lib/tallerConfig';
 
 export type QuoteStatus =
   | 'borrador'
@@ -20,6 +22,18 @@ export type QuoteStatus =
   | 'produccion'
   | 'entregada'
   | 'cancelada';
+
+export interface TicketItemCalc {
+  impresoraId: string;
+  materialId: string;
+  pesoGramos?: number;
+  volumenMl?: number;
+  horasImpresion: number;
+  minutosSetup: number;
+  minutosPostproceso: number;
+  extrasDirectos: number;
+  desglose: DesgloseCostoLote;
+}
 
 export interface TicketItem {
   id: string;
@@ -35,6 +49,7 @@ export interface TicketItem {
   itemType?: 'print' | 'hardware';
   profileId?: string;
   laborInfo?: number;
+  calc?: TicketItemCalc;
 }
 
 export interface StatusEvent {
@@ -60,6 +75,11 @@ export interface Quote {
   statusHistory: StatusEvent[];
   notes: string;
   isArchived: boolean;
+  pricingVersion?: 2;
+  configSnapshot?: TallerConfig;
+  urgente?: boolean;
+  envio?: number;
+  cobrarIva?: boolean;
 }
 
 export class QuoteNotFoundError extends Error {
@@ -69,6 +89,25 @@ export class QuoteNotFoundError extends Error {
     super(`No se encontró la cotización con id: ${id}`);
     this.name = 'QuoteNotFoundError';
   }
+}
+
+function cleanObjectForFirestore(obj: unknown): unknown {
+  if (obj === undefined) {
+    return null;
+  }
+  if (obj === null || typeof obj !== 'object') {
+    return obj;
+  }
+  if (Array.isArray(obj)) {
+    return obj.map(item => cleanObjectForFirestore(item));
+  }
+  const clean: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(obj)) {
+    if (value !== undefined) {
+      clean[key] = cleanObjectForFirestore(value);
+    }
+  }
+  return clean;
 }
 
 export const useQuoteHistory = () => {
@@ -120,7 +159,14 @@ export const useQuoteHistory = () => {
     clientName: string, 
     notes: string, 
     globalMargin: number, 
-    existingId?: string
+    existingId?: string,
+    extra?: {
+      pricingVersion?: 2;
+      configSnapshot?: TallerConfig;
+      urgente?: boolean;
+      envio?: number;
+      cobrarIva?: boolean;
+    }
   ): Promise<Quote> => {
     const total = items.reduce((acc, it) => acc + it.totalPrice, 0);
     const now = new Date().toISOString();
@@ -142,19 +188,18 @@ export const useQuoteHistory = () => {
         notes,
         total,
         globalMargin,
-        updatedAt: now
+        updatedAt: now,
+        ...(extra?.pricingVersion !== undefined ? { pricingVersion: extra.pricingVersion } : {}),
+        ...(extra?.configSnapshot !== undefined ? { configSnapshot: extra.configSnapshot } : {}),
+        ...(extra?.urgente !== undefined ? { urgente: extra.urgente } : {}),
+        ...(extra?.envio !== undefined ? { envio: extra.envio } : {}),
+        ...(extra?.cobrarIva !== undefined ? { cobrarIva: extra.cobrarIva } : {})
       };
 
+      const payload = cleanObjectForFirestore(updatedQuote) as Record<string, unknown>;
+
       try {
-        await updateDoc(quoteDocRef, {
-          items, 
-          operatorName, 
-          clientName, 
-          notes, 
-          total, 
-          globalMargin, 
-          updatedAt: now
-        });
+        await updateDoc(quoteDocRef, payload);
       } catch (e) {
         handleFirestoreError(e, OperationType.UPDATE, `quotes/${existingId}`);
       }
@@ -162,7 +207,6 @@ export const useQuoteHistory = () => {
       return updatedQuote;
     }
     
-    // Solo crea documento nuevo cuando existingId venga undefined
     const folio = await getNextFolio();
     const newId = Date.now().toString() + Math.random().toString(36).substring(2, 9);
     const finalQuote: Quote = {
@@ -180,10 +224,17 @@ export const useQuoteHistory = () => {
       statusHistory: [],
       notes,
       isArchived: false,
+      ...(extra?.pricingVersion !== undefined ? { pricingVersion: extra.pricingVersion } : {}),
+      ...(extra?.configSnapshot !== undefined ? { configSnapshot: extra.configSnapshot } : {}),
+      ...(extra?.urgente !== undefined ? { urgente: extra.urgente } : {}),
+      ...(extra?.envio !== undefined ? { envio: extra.envio } : {}),
+      ...(extra?.cobrarIva !== undefined ? { cobrarIva: extra.cobrarIva } : {})
     };
+
+    const payload = cleanObjectForFirestore(finalQuote) as Record<string, unknown>;
     
     try {
-      await setDoc(doc(db, 'quotes', newId), finalQuote);
+      await setDoc(doc(db, 'quotes', newId), payload);
     } catch (e) {
       handleFirestoreError(e, OperationType.CREATE, `quotes/${newId}`);
     }
@@ -210,7 +261,7 @@ export const useQuoteHistory = () => {
       to: newStatus,
       changedBy: operatorName || q.operatorName,
       changedAt: now,
-      note
+      ...(note !== undefined ? { note } : {})
     };
     
     try {
@@ -300,10 +351,17 @@ export const useQuoteHistory = () => {
       statusHistory: [],
       notes: original.notes,
       isArchived: false,
+      ...(original.pricingVersion !== undefined ? { pricingVersion: original.pricingVersion } : {}),
+      ...(original.configSnapshot !== undefined ? { configSnapshot: original.configSnapshot } : {}),
+      ...(original.urgente !== undefined ? { urgente: original.urgente } : {}),
+      ...(original.envio !== undefined ? { envio: original.envio } : {}),
+      ...(original.cobrarIva !== undefined ? { cobrarIva: original.cobrarIva } : {})
     };
+
+    const payload = cleanObjectForFirestore(cloned) as Record<string, unknown>;
     
     try {
-      await setDoc(doc(db, 'quotes', newId), cloned);
+      await setDoc(doc(db, 'quotes', newId), payload);
     } catch (e) {
       handleFirestoreError(e, OperationType.CREATE, `quotes/${newId}`);
     }

@@ -3,6 +3,7 @@ import {createRoot} from 'react-dom/client';
 import App from './App.tsx';
 import { ToastProvider } from './hooks/useToast.tsx';
 import { ToastContainer } from './components/Toast.tsx';
+import './lib/ticket.ts';
 import './index.css';
 
 createRoot(document.getElementById('root')!).render(
