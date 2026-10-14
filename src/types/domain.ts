@@ -15,9 +15,24 @@
 // VALORES POR DEFECTO DEL TALLER (MÉXICO - MXN)
 // =============================================================================
 
+export interface OverheadConfig {
+  modo: 'porHora' | 'porcentaje'; // default 'porHora'
+  costosFijosMensuales: number;    // suma de renta + internet + software + etc. Default 4000
+  horasProductivasMes: number;     // horas de máquina REALES al mes. Default 160
+  tasaManualPorHora?: number;      // escape hatch si ya la tienes calculada
+  porcentajeFallback: number;      // solo si modo === 'porcentaje'. Default 0.10
+}
+
 export const DEFAULT_TALLER_SETTINGS = {
   tarifaKwh: 2.80, // Tarifa comercial PDBT / CFE en MXN
   tarifaOperadorHora: 120.00, // Costo por hora técnica/operador en MXN
+  tarifaDisenoHora: 250.00, // Tarifa de diseño y modelado CAD en MXN (una sola vez por trabajo)
+  overhead: {
+    modo: 'porHora' as const,
+    costosFijosMensuales: 4000.00, // Gastos fijos mensuales (renta, internet, licencias, etc.)
+    horasProductivasMes: 160, // Horas reales estimadas de máquina al mes
+    porcentajeFallback: 0.10, // 10% si modo === 'porcentaje'
+  },
   ivaTasa: 0.16, // IVA vigente en México (16%)
   vigenciaDias: 15, // Validez comercial estándar de cotización
   margenPorDefecto: 0.45, // Margen comercial objetivo del 45% (equivalente a ~81.8% de markup)
@@ -59,6 +74,8 @@ export interface Settings extends BaseCatalogEntity {
   rfc?: string;
   tarifaKwh: number;
   tarifaOperadorHora: number;
+  tarifaDisenoHora: number;
+  overhead: OverheadConfig;
   ivaTasa: number;
   vigenciaDias: number;
   margenPorDefecto: number;
@@ -202,13 +219,21 @@ export interface CostBreakdown {
   energia: number; // MXN
   maquina: number; // MXN (amortización + mantenimiento)
   consumibles: number; // MXN (prorrateo de boquillas, FEP, filtros, etc.)
-  laborSetup: number; // MXN (preparación y laminado, 1 sola vez por corrida)
+  laborModelado: number; // MXN (diseño/CAD, 1 sola vez por corrida)
+  laborAlistado: number; // MXN (preparación y calibración, ex-laborSetup)
   laborPost: number; // MXN (acabado, curado o limpieza por pieza)
   extras: number; // MXN (insertos, tornillos, empaques directos)
-  costoDirecto: number; // Suma de las 6 capas anteriores
-  reservaFalla: number; // Monto absorbido por contingencia: costoDirecto / (1 - tasaFalla) - costoDirecto
-  costoTotal: number; // Costo real total absorbido
-  costoUnitario: number; // costoTotal / cantidad
+  subtotalTecnico: number; // MXN (suma de costos técnicos directos antes de overhead)
+  overhead: number; // MXN (gastos fijos del taller prorrateados)
+  costoDirecto: number; // MXN (base con overhead previa a contingencia/fallos)
+  reservaFalla: number; // MXN (monto absorbido por contingencia de fallo)
+  costoTotal: number; // MXN (costo real total absorbido)
+  costoUnitario: number; // MXN (costoTotal / cantidad)
+  /**
+   * Retrocompatibilidad con cotizaciones existentes y vistas previas.
+   * Si no se especifica laborSetup de forma independiente, equivale a laborAlistado.
+   */
+  laborSetup?: number;
 }
 
 // =============================================================================
@@ -238,8 +263,14 @@ export interface QuoteItemImpresionFDM extends BaseQuoteItem {
   presetId?: UUID;
   pesoGramos: number; // Consumo total del lote de piezas
   horasImpresion: number; // Horas máquina del lote
-  minutosSetup: number; // Preparación única por lote
+  minutosModelado: number; // Minutos de diseño/CAD (único por lote)
+  minutosAlistado: number; // Minutos de calibración/laminado (único por lote)
   minutosPostproceso: number; // Minutos por pieza
+  /**
+   * Alias de compatibilidad para cotizaciones guardadas previamente.
+   * Al leer, si minutosAlistado no está presente, se mapea desde minutosSetup.
+   */
+  minutosSetup?: number;
   dimensionesMm?: DimensionesMm;
   breakdown: CostBreakdown;
   margenAplicado: number;
@@ -253,8 +284,14 @@ export interface QuoteItemImpresionMSLA extends BaseQuoteItem {
   presetId?: UUID;
   volumenMl: number; // Consumo total de resina en ml
   horasImpresion: number; // Horas máquina del lote
-  minutosSetup: number; // Preparación única por lote
+  minutosModelado: number; // Minutos de diseño/CAD (único por lote)
+  minutosAlistado: number; // Minutos de preparación/calibración (único por lote)
   minutosPostproceso: number; // Minutos por pieza
+  /**
+   * Alias de compatibilidad para cotizaciones guardadas previamente.
+   * Al leer, si minutosAlistado no está presente, se mapea desde minutosSetup.
+   */
+  minutosSetup?: number;
   dimensionesMm?: DimensionesMm;
   breakdown: CostBreakdown;
   margenAplicado: number;
@@ -307,6 +344,8 @@ export interface PricingSnapshot {
   capturedAt: string; // ISO 8601
   tarifaKwh: number;
   tarifaOperadorHora: number;
+  tarifaDisenoHora?: number;
+  overhead?: OverheadConfig;
   ivaTasa: number;
   materiales: Record<UUID, Material>;
   impresoras: Record<UUID, Printer>;

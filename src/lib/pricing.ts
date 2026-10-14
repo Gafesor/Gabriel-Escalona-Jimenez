@@ -1,47 +1,34 @@
 /**
- * CubeUp³ — Motor de Cálculo y Fijación de Precios (Pricing Engine)
+ * CubeUp³ — Motor Matemático de Precios y Costos de Manufactura Aditiva
  * 
- * Módulo puramente funcional (funciones puras sin efectos secundarios, sin React, sin Firebase).
- * Único punto canónico en el sistema donde se calcula dinero y costos de manufactura aditiva.
- * 
- * Todas las operaciones monetarias internas intermedias operan en precisión de punto flotante
- * y se convierten/redondean estrictamente al final en centavos enteros para evitar errores
- * de acumulación por punto flotante binario (IEEE 754).
+ * Reglas cardinales:
+ * 1. Todos los montos monetarios están expresados en MXN.
+ * 2. Cero atajos: sin tipos 'any', sin try/catch silenciosos, sin '?? 0' que oculten datos faltantes.
+ * 3. Margen comercial real: precio = costo / (1 - margen), garantizando que el % sea sobre venta.
+ * 4. Contingencia por falla: costoBase / (1 - tasaFalla), protegiendo material, energía, máquina y overhead.
+ * 5. Rentabilidad temporal: cálculo explícito de utilidad por hora de máquina y por hora de persona.
  */
 
-// =============================================================================
-// TIPOS E INTERFACES DEL MODELO DE COSTOS
-// =============================================================================
+import { OverheadConfig, calcularTasaOverheadHora } from './tallerConfig';
 
 export type TecnologiaImpresion = 'FDM' | 'MSLA';
-
-export type UnidadVidaConsumible = 'impresiones' | 'horas' | 'litros_procesados';
 
 export interface ConsumibleAplicable {
   id: string;
   nombre: string;
-  costo: number; // MXN
-  vidaUtil: number; // En la unidad especificada
-  unidadVida: UnidadVidaConsumible;
+  costoUnitario: number;
+  unidadesConsumidas: number;
 }
 
 export interface ImpresoraConfig {
   id: string;
   nombre: string;
   tecnologia: TecnologiaImpresion;
-  /**
-   * NOTA CRÍTICA DE ENERGÍA:
-   * Debe ser la potencia PROMEDIO MEDIDA durante operación real (por ejemplo con kill-a-watt o smart plug),
-   * NO la potencia nominal de la placa o fuente de poder.
-   * Ejemplo: Una Bambu Lab X1-Carbon cuenta con fuente nominal de 1000 W (para calentamiento rápido de cama),
-   * pero promedia ~105 W imprimiendo PLA. Utilizar la nominal de 1000 W provocaría una sobreestimación
-   * de casi 10x arrastrada a cada cotización comercial del taller.
-   */
   potenciaPromedioW: number;
-  precioCompra: number; // Costo de adquisición de la máquina en MXN
-  vidaUtilHoras: number; // Horas totales estimadas de vida operativa antes de reposición
-  mantenimientoPorHora: number; // MXN por hora en refacciones, lubricación y desgastes menores
-  tarifaHoraManual?: number; // Si se define, anula la amortización + mantenimiento estándar
+  precioCompra: number;
+  vidaUtilHoras: number;
+  mantenimientoPorHora: number;
+  tarifaHoraManual?: number;
   volumenMaxMm: {
     x: number;
     y: number;
@@ -53,8 +40,8 @@ export interface MaterialConfig {
   id: string;
   nombre: string;
   tecnologia: TecnologiaImpresion;
-  costoPorUnidad: number; // MXN por Kg (FDM) o MXN por Litro (MSLA)
-  mermaPorcentaje: number; // Ratio 0.05 = 5% por purgas, soportes, brim, torres de purga
+  costoPorUnidad: number; // MXN por kg (FDM) o litro (MSLA)
+  mermaPorcentaje: number; // 0.05 = 5%
 }
 
 export interface DimensionesPiezaMm {
@@ -66,48 +53,38 @@ export interface DimensionesPiezaMm {
 export interface LineaInput {
   id: string;
   nombrePieza: string;
-  tecnologia: TecnologiaImpresion;
-  cantidad: number; // Unidades del trabajo/lote
-  horasImpresion: number; // Horas de máquina dedicadas a fabricar la cantidad total o batch
+  tecnologia?: TecnologiaImpresion;
+  cantidad: number;
+  horasImpresion: number; // Horas totales de máquina para el lote completo
+  pesoGramos?: number; // Para FDM
+  volumenMl?: number; // Para MSLA
   dimensionesMm?: DimensionesPiezaMm;
-  
-  // Parámetros FDM
-  pesoGramos?: number; // Total de gramos de filamento consumidos (incluye soportes)
-
-  // Parámetros MSLA
-  volumenMl?: number; // Total de mililitros de resina consumidos
-
-  // Consumibles asociados directamente
   consumibles?: ConsumibleAplicable[];
 
-  // Mano de obra (Labor)
-  minutosSetup: number; // Tiempo de preparación (laminado, calibración, envío). Se incurre UNA VEZ por lote.
-  minutosPostproceso: number; // Tiempo de remoción de soportes, curado, lavado, pulido. Se incurre POR PIEZA.
+  // Mano de obra en tres partes
+  minutosModelado?: number; // Diseño/CAD. UNA VEZ por trabajo. Tarifa propia.
+  minutosAlistado?: number; // Preparación/laminado/calibración. UNA VEZ por trabajo. Tarifa operador.
+  minutosSetup?: number; // Alias de compatibilidad para cotizaciones previas (migra a minutosAlistado)
+  minutosPostproceso: number; // Limpieza/soportes/curado. POR PIEZA. Tarifa operador.
 
-  // Insumos extras o herrajes directos
-  extrasDirectos: number; // MXN totales en tornillería, insertos roscados térmicos, empaque individual, pintura, etc.
-
-  // Factores específicos de la pieza (sobrescriben contexto si existen)
-  tasaFalla?: number; // 0.0 a 0.5
-  margen?: number; // 0.0 a 0.95
+  extrasDirectos: number; // Herrajes, tornillos, empaques
+  tasaFalla?: number;
+  margen?: number;
 }
 
 export interface PricingContext {
-  // Parámetros globales de taller
-  tarifaKwh: number; // Tarifa eléctrica en MXN por kWh (ej. 3.20 en tarifa comercial CFE)
-  tarifaOperadorHora: number; // Costo por hora del técnico u operador en MXN
-  margenPorDefecto: number; // Margen comercial (ej. 0.30 = 30%)
-  tasaFallaPorDefecto: number; // Tasa de contingencia/falla promedio (ej. 0.08 = 8%)
-  
-  // Políticas de cobro y redondeo
-  minimoPorPieza: number; // Precio mínimo de venta por pieza en MXN (ej. 50.00)
-  pasoRedondeo: number; // Múltiplo para Math.ceil (ej. 1 = al peso, 5 = múltiplos de $5, 0.5 = múltiplos de 50 centavos)
-  minimoPedido: number; // Cobro mínimo de orden en taller (ej. 150.00)
-  recargoUrgencia: number; // Porcentaje de sobrecargo por orden express (ej. 0.20 = 20%)
-  envio: number; // Flete o entrega local en MXN
-  ivaTasa: number; // Tasa impositiva (ej. 0.16 para 16% de IVA en México)
-
-  // Catálogos vinculados a la línea
+  tarifaKwh: number;
+  tarifaOperadorHora: number;
+  tarifaDisenoHora: number;
+  overhead: OverheadConfig;
+  margenPorDefecto: number;
+  tasaFallaPorDefecto: number;
+  minimoPorPieza: number;
+  pasoRedondeo: number;
+  minimoPedido: number;
+  recargoUrgencia: number;
+  envio: number;
+  ivaTasa: number;
   impresora: ImpresoraConfig;
   material: MaterialConfig;
 }
@@ -117,9 +94,13 @@ export interface DesgloseCostoLote {
   energia: number;
   maquina: number;
   consumibles: number;
-  laborSetup: number;
+  laborModelado: number;
+  laborAlistado: number;
   laborPost: number;
+  laborSetup?: number; // Retrocompatibilidad con vistas
   extras: number;
+  subtotalTecnico: number;
+  overhead: number;
   costoDirecto: number;
   reservaFalla: number;
   costoTotal: number;
@@ -136,516 +117,594 @@ export interface LineaResultado {
   precioTotal: number;
   margenRealizado: number;
   utilidad: number;
+  utilidadPorHoraMaquina: number | null;
+  utilidadPorHoraPersona: number | null;
+  horasPersonaTotales: number;
 }
 
-export interface CotizacionResultado {
+export interface PasoCascada {
+  clave: string;
+  etiqueta: string;
+  monto: number;
+  acumulado: number;
+  tipo: 'componente' | 'subtotal' | 'ajuste' | 'total';
+  porcentajeDelPrecio: number;
+  ayuda: string;
+}
+
+export interface ResumenTicket {
   lineas: LineaResultado[];
-  costoTotalLote: number;
   subtotal: number;
-  recargoUrgenciaMonto: number;
-  costoEnvio: number;
-  total: number;
-  ivaMonto: number;
+  ajusteMinimoPedido: number;
+  recargoUrgencia: number;
+  envio: number;
+  totalSinIva: number;
+  iva: number;
   totalConIva: number;
-  utilidadNeta: number;
-  margenGlobalRealizado: number;
+  costoTotalTicket: number;
+  utilidadTotal: number;
+  margenRealizadoTicket: number;
+  gananciaPorRedondeoYMinimos: number;
+  desgloseAgregado: {
+    material: number;
+    energia: number;
+    maquina: number;
+    consumibles: number;
+    laborModelado: number;
+    laborAlistado: number;
+    laborPost: number;
+    extras: number;
+    overhead: number;
+    reservaFalla: number;
+    envio: number;
+    recargoUrgencia: number;
+    utilidad: number;
+    iva: number;
+  };
 }
-
-export interface EscalonResultado {
-  cantidad: number;
-  costoUnitario: number;
-  precioUnitario: number;
-  precioTotal: number;
-  ahorroPorcentualRespectoAUnitaria: number;
-}
-
-export type TipoProblema = 'error' | 'advertencia';
 
 export interface ProblemaValidacion {
-  campo: string;
-  tipo: TipoProblema;
+  campo: 'nombrePieza' | 'pesoGramos' | 'volumenMl' | 'horasImpresion' | 'cantidad' | 'overhead';
   mensaje: string;
-}
-
-// =============================================================================
-// FUNCIONES DE EQUIVALENCIA: MARGEN VS MARKUP
-// =============================================================================
-
-/**
- * Convierte un factor de Markup (sobrecosto porcentual sobre el costo) a Margen Real sobre precio.
- * 
- * NOTA COMERCIAL CRÍTICA:
- * Un "markup" del 30% (`costo * 1.30`) NO equivale a un margen del 30%.
- * Representa un margen real de solo 23.07%:
- *   margen = markup / (1 + markup) = 0.30 / 1.30 = 0.23076...
- * Vender calculando `costo * (1 + margenDeseado)` resulta en un déficit sistemático de ganancias.
- */
-export function markupToMargen(markup: number): number {
-  if (markup < 0) return 0;
-  return markup / (1 + markup);
+  tipo: 'error' | 'advertencia';
 }
 
 /**
- * Convierte un Margen Real deseado a su multiplicador equivalente de Markup.
- *   markup = margen / (1 - margen)
- * Ejemplo: Para obtener 50% de margen real, se requiere un markup del 100% (vender al doble del costo).
+ * Valida los datos de entrada de una línea de cotización en tiempo real.
  */
-export function margenToMarkup(margen: number): number {
-  if (margen <= 0) return 0;
-  if (margen >= 0.9999) return 9999;
-  return margen / (1 - margen);
-}
-
-/**
- * Redondea un valor en pesos hacia el múltiplo superior definido por `paso`.
- * Trabaja en centavos enteros para evitar imprecisiones de coma flotante.
- */
-export function redondearAlPaso(monto: number, paso: number): number {
-  if (paso <= 0) return Math.round(monto * 100) / 100;
-  
-  const montoCentavos = Math.round(monto * 100);
-  const pasoCentavos = Math.round(paso * 100);
-  
-  const unidades = Math.ceil(montoCentavos / pasoCentavos);
-  return (unidades * pasoCentavos) / 100;
-}
-
-// =============================================================================
-// MOTOR PURAMENTE MATEMÁTICO: CÁLCULO DE LÍNEA
-// =============================================================================
-
-export function calcularLinea(input: LineaInput, ctx: PricingContext): LineaResultado {
-  const cantidad = Math.max(1, Math.floor(input.cantidad));
-  const horas = Math.max(0, input.horasImpresion);
-  const merma = Math.max(0, ctx.material.mermaPorcentaje);
-
-  // 1. MATERIAL
-  let costoMaterial = 0;
-  if (input.tecnologia === 'FDM') {
-    const pesoG = Math.max(0, input.pesoGramos || 0);
-    // Formula: (pesoG / 1000) * precioPorKg * (1 + merma)
-    costoMaterial = (pesoG / 1000) * ctx.material.costoPorUnidad * (1 + merma);
-  } else {
-    const volMl = Math.max(0, input.volumenMl || 0);
-    // Formula: (volumenMl / 1000) * precioPorLitro * (1 + merma)
-    costoMaterial = (volMl / 1000) * ctx.material.costoPorUnidad * (1 + merma);
-  }
-
-  // 2. ENERGÍA
-  // Formula: (potenciaPromedioW / 1000) * horas * tarifaKwh
-  const costoEnergia = (ctx.impresora.potenciaPromedioW / 1000) * horas * ctx.tarifaKwh;
-
-  // 3. MÁQUINA (AMORTIZACIÓN Y MANTENIMIENTO)
-  let costoMaquina = 0;
-  if (ctx.impresora.tarifaHoraManual !== undefined && ctx.impresora.tarifaHoraManual >= 0) {
-    costoMaquina = horas * ctx.impresora.tarifaHoraManual;
-  } else {
-    const amortizacionHora = ctx.impresora.vidaUtilHoras > 0
-      ? ctx.impresora.precioCompra / ctx.impresora.vidaUtilHoras
-      : 0;
-    costoMaquina = horas * (amortizacionHora + ctx.impresora.mantenimientoPorHora);
-  }
-
-  // 4. CONSUMIBLES
-  // Suma de consumibles aplicables prorrateados según su unidadVida
-  let costoConsumibles = 0;
-  if (input.consumibles && input.consumibles.length > 0) {
-    for (const c of input.consumibles) {
-      if (c.vidaUtil <= 0) continue;
-      if (c.unidadVida === 'impresiones') {
-        // Desgaste por corrida/plataforma realizada (1 corrida para el lote completo)
-        costoConsumibles += c.costo / c.vidaUtil;
-      } else if (c.unidadVida === 'horas') {
-        costoConsumibles += (horas * c.costo) / c.vidaUtil;
-      } else if (c.unidadVida === 'litros_procesados') {
-        const litrosUsados = (input.volumenMl || 0) / 1000;
-        costoConsumibles += (litrosUsados * c.costo) / c.vidaUtil;
-      }
-    }
-  }
-
-  // 5. LABOR (MANO DE OBRA)
-  // Setup: UNA VEZ POR TRABAJO/LOTE (20 piezas no requieren 20 setups de rebanador/calibración)
-  const costoLaborSetup = (Math.max(0, input.minutosSetup) / 60) * ctx.tarifaOperadorHora;
-  // Postproceso: POR PIEZA (lavar, curar, desbastar o pulir escala con cada unidad producida)
-  const costoLaborPost = (Math.max(0, input.minutosPostproceso) / 60) * ctx.tarifaOperadorHora * cantidad;
-
-  // 6. EXTRAS DIRECTOS
-  const costoExtras = Math.max(0, input.extrasDirectos);
-
-  // COSTO DIRECTO DEL LOTE (Suma de las primeras 6 capas)
-  const costoDirecto = costoMaterial + costoEnergia + costoMaquina + costoConsumibles + costoLaborSetup + costoLaborPost + costoExtras;
-
-  // 7. RESERVA DE FALLA
-  // OJO CRÍTICO: Se DIVIDE entre (1 - tasaFalla), no se multiplica.
-  // Demostración: Si la tasa de falla es 10% (0.10), por cada 10 piezas lanzadas fallará 1 y saldrán 9 buenas.
-  // La pieza buena debe absorber el costo completo de las fallidas: costoDirecto / 0.90 = costoDirecto * 1.111...
-  // Si se usara `* (1 + 0.10)`, el taller recuperaría solo el 10% adicional, quedando en pérdida ante reimpresiones completas.
-  const tasaFalla = Math.min(0.499, Math.max(0, input.tasaFalla !== undefined ? input.tasaFalla : ctx.tasaFallaPorDefecto));
-  const costoRealTotal = costoDirecto / (1 - tasaFalla);
-  const reservaFalla = costoRealTotal - costoDirecto;
-
-  const desgloseLote: DesgloseCostoLote = {
-    material: costoMaterial,
-    energia: costoEnergia,
-    maquina: costoMaquina,
-    consumibles: costoConsumibles,
-    laborSetup: costoLaborSetup,
-    laborPost: costoLaborPost,
-    extras: costoExtras,
-    costoDirecto,
-    reservaFalla,
-    costoTotal: costoRealTotal
-  };
-
-  const costoUnitario = costoRealTotal / cantidad;
-
-  // CÁLCULO DE PRECIO
-  // Formula: precioBase = costoReal / (1 - margen)  [Margen real sobre venta]
-  const margen = Math.min(0.949, Math.max(0, input.margen !== undefined ? input.margen : ctx.margenPorDefecto));
-  const precioBaseLote = costoRealTotal / (1 - margen);
-  const precioBaseUnitario = precioBaseLote / cantidad;
-
-  // Aplicar precio mínimo por pieza configurado
-  const precioConMinimo = Math.max(precioBaseUnitario, ctx.minimoPorPieza);
-
-  // Redondear al paso configurado
-  const precioUnitario = redondearAlPaso(precioConMinimo, ctx.pasoRedondeo);
-  const precioTotal = Math.round(precioUnitario * cantidad * 100) / 100;
-
-  // Métricas financieras reales resultantes
-  const utilidad = precioTotal - costoRealTotal;
-  const margenRealizado = precioTotal > 0 ? utilidad / precioTotal : 0;
-
-  return {
-    id: input.id,
-    nombrePieza: input.nombrePieza,
-    cantidad,
-    desgloseLote,
-    costoUnitario,
-    costoTotal: costoRealTotal,
-    precioUnitario,
-    precioTotal,
-    margenRealizado,
-    utilidad
-  };
-}
-
-// =============================================================================
-// CÁLCULO GENERAL DE COTIZACIÓN
-// =============================================================================
-
-export function calcularCotizacion(lineas: LineaInput[], ctx: PricingContext): CotizacionResultado {
-  const lineasResultados = lineas.map(linea => calcularLinea(linea, ctx));
-
-  const costoTotalLote = lineasResultados.reduce((acc, l) => acc + l.costoTotal, 0);
-  const sumaSubtotales = lineasResultados.reduce((acc, l) => acc + l.precioTotal, 0);
-
-  // Aplicar mínimo de pedido del taller
-  const baseSubtotal = Math.max(sumaSubtotales, ctx.minimoPedido);
-
-  // Recargo de urgencia sobre el subtotal de trabajo
-  const factorUrgencia = Math.max(0, ctx.recargoUrgencia);
-  const recargoUrgenciaMonto = Math.round(baseSubtotal * factorUrgencia * 100) / 100;
-
-  const costoEnvio = Math.max(0, ctx.envio);
-
-  // Total antes de impuestos
-  const total = baseSubtotal + recargoUrgenciaMonto + costoEnvio;
-
-  // Impuestos (IVA)
-  const ivaTasa = Math.max(0, ctx.ivaTasa);
-  const ivaMonto = Math.round(total * ivaTasa * 100) / 100;
-  const totalConIva = Math.round((total + ivaMonto) * 100) / 100;
-
-  // Utilidad neta global del taller
-  const utilidadNeta = total - (costoTotalLote + costoEnvio);
-  const margenGlobalRealizado = total > 0 ? utilidadNeta / total : 0;
-
-  return {
-    lineas: lineasResultados,
-    costoTotalLote,
-    subtotal: baseSubtotal,
-    recargoUrgenciaMonto,
-    costoEnvio,
-    total,
-    ivaMonto,
-    totalConIva,
-    utilidadNeta,
-    margenGlobalRealizado
-  };
-}
-
-// =============================================================================
-// ESCALONES DE PRECIO POR VOLUMEN (TIERED PRICING)
-// =============================================================================
-
-export function calcularEscalones(
-  linea: LineaInput,
-  ctx: PricingContext,
-  cantidades: number[]
-): EscalonResultado[] {
-  // Obtener primero el precio unitario base de 1 pieza como referencia
-  const lineaBaseUnit = calcularLinea({ ...linea, cantidad: 1 }, ctx);
-  const precioUnitarioReferencia = lineaBaseUnit.precioUnitario;
-
-  const escalones = cantidades
-    .filter(c => c > 0)
-    .sort((a, b) => a - b)
-    .map(cant => {
-      const resultado = calcularLinea({ ...linea, cantidad: cant }, ctx);
-      const ahorro = precioUnitarioReferencia > 0
-        ? Math.max(0, (precioUnitarioReferencia - resultado.precioUnitario) / precioUnitarioReferencia)
-        : 0;
-
-      return {
-        cantidad: cant,
-        costoUnitario: resultado.costoUnitario,
-        precioUnitario: resultado.precioUnitario,
-        precioTotal: resultado.precioTotal,
-        ahorroPorcentualRespectoAUnitaria: Math.round(ahorro * 1000) / 10 // Ej. 14.5%
-      };
-    });
-
-  return escalones;
-}
-
-// =============================================================================
-// VALIDACIONES Y AUDITORÍA DE DATOS
-// =============================================================================
-
-export function validarLinea(input: LineaInput, ctx?: PricingContext): ProblemaValidacion[] {
+export function validarLinea(input: LineaInput, ctx: PricingContext): ProblemaValidacion[] {
   const problemas: ProblemaValidacion[] = [];
 
-  // Cantidad
-  if (!Number.isFinite(input.cantidad) || input.cantidad <= 0) {
+  if (!input.nombrePieza.trim()) {
+    problemas.push({
+      campo: 'nombrePieza',
+      mensaje: 'El nombre de la pieza es requerido.',
+      tipo: 'error'
+    });
+  }
+
+  if (input.cantidad < 1) {
     problemas.push({
       campo: 'cantidad',
-      tipo: 'error',
-      mensaje: 'La cantidad debe ser un número entero mayor a cero.'
+      mensaje: 'La cantidad debe ser al menos 1 pieza.',
+      tipo: 'error'
     });
   }
 
-  // Horas de impresión
-  if (!Number.isFinite(input.horasImpresion) || input.horasImpresion <= 0) {
-    problemas.push({
-      campo: 'horasImpresion',
-      tipo: 'error',
-      mensaje: 'El tiempo de impresión debe ser un número finito mayor a 0.'
-    });
-  }
-
-  // Consumo según tecnología
-  if (input.tecnologia === 'FDM') {
-    if (input.pesoGramos === undefined || !Number.isFinite(input.pesoGramos) || input.pesoGramos <= 0) {
+  if (ctx.material.tecnologia === 'FDM') {
+    const gramos = input.pesoGramos ?? 0;
+    if (gramos <= 0) {
       problemas.push({
         campo: 'pesoGramos',
-        tipo: 'error',
-        mensaje: 'En tecnología FDM el peso en gramos debe ser mayor a 0.'
+        mensaje: 'Ingresa el peso en gramos mayor a 0.',
+        tipo: 'error'
       });
-    } else if (input.horasImpresion > 0) {
-      // Regla heurística de taller: Caudal volumétrico normal FDM ronda entre 3 y 30 g/h
-      // Si cae fuera, suele ser error humano de captura (ej. poner gramos en kilos o viceversa).
-      const gPorHora = input.pesoGramos / input.horasImpresion;
-      if (gPorHora < 3 || gPorHora > 30) {
-        problemas.push({
-          campo: 'pesoGramos',
-          tipo: 'advertencia',
-          mensaje: `El ratio de flujo calculado (${gPorHora.toFixed(1)} g/h) cae fuera del rango típico de impresión FDM (3–30 g/h). Verifica si el tiempo o peso fueron capturados incorrectamente.`
-        });
-      }
+    } else if (gramos > 5000) {
+      problemas.push({
+        campo: 'pesoGramos',
+        mensaje: 'Peso inusualmente alto (> 5 kg). Verifica el laminador.',
+        tipo: 'advertencia'
+      });
     }
-  } else if (input.tecnologia === 'MSLA') {
-    if (input.volumenMl === undefined || !Number.isFinite(input.volumenMl) || input.volumenMl <= 0) {
+  } else {
+    const ml = input.volumenMl ?? 0;
+    if (ml <= 0) {
       problemas.push({
         campo: 'volumenMl',
-        tipo: 'error',
-        mensaje: 'En tecnología MSLA el volumen en mililitros de resina debe ser mayor a 0.'
+        mensaje: 'Ingresa el volumen en ml mayor a 0.',
+        tipo: 'error'
+      });
+    } else if (ml > 2000) {
+      problemas.push({
+        campo: 'volumenMl',
+        mensaje: 'Volumen inusualmente alto (> 2 L). Verifica el laminador.',
+        tipo: 'advertencia'
       });
     }
   }
 
-  // Márgenes y tasas
-  const margenEvaluado = input.margen !== undefined ? input.margen : ctx?.margenPorDefecto;
-  if (margenEvaluado !== undefined) {
-    if (!Number.isFinite(margenEvaluado) || margenEvaluado < 0 || margenEvaluado >= 0.95) {
-      problemas.push({
-        campo: 'margen',
-        tipo: 'error',
-        mensaje: 'El margen debe ser un número entre 0.00 (0%) y menor a 0.95 (95%). Un margen de 1.0 provocaría división entre cero.'
-      });
-    }
-  }
-
-  const tasaFallaEvaluada = input.tasaFalla !== undefined ? input.tasaFalla : ctx?.tasaFallaPorDefecto;
-  if (tasaFallaEvaluada !== undefined) {
-    if (!Number.isFinite(tasaFallaEvaluada) || tasaFallaEvaluada < 0 || tasaFallaEvaluada >= 0.5) {
-      problemas.push({
-        campo: 'tasaFalla',
-        tipo: 'error',
-        mensaje: 'La reserva de falla debe estar entre 0.00 (0%) y menor a 0.50 (50%). Valores superiores indican un proceso inestable no cotizable.'
-      });
-    }
-  }
-
-  // Dimensiones vs Volumen de la Impresora
-  if (input.dimensionesMm && ctx?.impresora?.volumenMaxMm) {
-    const { x, y, z } = input.dimensionesMm;
-    const max = ctx.impresora.volumenMaxMm;
-
-    // Comparar si cabe en alguna orientación elemental
-    const dimsPieza = [x, y, z].sort((a, b) => a - b);
-    const dimsMax = [max.x, max.y, max.z].sort((a, b) => a - b);
-
-    if (dimsPieza[0] > dimsMax[0] || dimsPieza[1] > dimsMax[1] || dimsPieza[2] > dimsMax[2]) {
-      problemas.push({
-        campo: 'dimensionesMm',
-        tipo: 'error',
-        mensaje: `La pieza (${x}x${y}x${z} mm) excede el volumen máximo imprimible de la ${ctx.impresora.nombre} (${max.x}x${max.y}x${max.z} mm). Requiere segmentación o una máquina de mayor volumen.`
-      });
-    }
+  if (input.horasImpresion <= 0) {
+    problemas.push({
+      campo: 'horasImpresion',
+      mensaje: 'Ingresa el tiempo de impresión en horas mayor a 0.',
+      tipo: 'error'
+    });
+  } else if (input.horasImpresion > 200) {
+    problemas.push({
+      campo: 'horasImpresion',
+      mensaje: 'Tiempo de impresión muy alto (> 200 h). Verifica si es correcto.',
+      tipo: 'advertencia'
+    });
   }
 
   return problemas;
 }
 
-// =============================================================================
-// CASOS DE PRUEBA RESUELTOS A MANO (VERIFICACIÓN Y AUDITORÍA DEL MOTOR)
-// =============================================================================
+/**
+ * Convierte un margen comercial (fracción sobre precio de venta) a markup (sobrecosto sobre costo).
+ * Ejemplo: margen 0.45 (45%) => markup ~0.818 (81.8%).
+ */
+export function margenToMarkup(margen: number): number {
+  const m = Math.max(0, Math.min(0.99, margen));
+  return (1 - m) > 0 ? m / (1 - m) : 0;
+}
+
+/**
+ * Convierte un markup (sobrecosto sobre costo) a margen comercial (sobre precio de venta).
+ */
+export function markupToMargen(markup: number): number {
+  const mu = Math.max(0, markup);
+  return mu / (1 + mu);
+}
+
+/**
+ * Redondea un valor hacia arriba al múltiplo del paso especificado (0.5, 1, 5, 10).
+ */
+export function redondearAlPaso(valor: number, paso: number): number {
+  if (paso <= 0 || !Number.isFinite(paso)) return valor;
+  const factor = 1 / paso;
+  return Math.ceil(valor * factor) / factor;
+}
+
+/**
+ * Calcula una línea de cotización con estricto orden de cascada:
+ * 1. Costos directos técnicos (material, energía, máquina, consumibles, 3 labores, extras)
+ * 2. Overhead prorrateado
+ * 3. Base con fallo = (subtotalTecnico + overhead) / (1 - tasaFalla)
+ * 4. Precio base lote = baseConFallos / (1 - margen)
+ * 5. Aplicación de mínimo por pieza y redondeo comercial
+ */
+export function calcularLinea(input: LineaInput, ctx: PricingContext): LineaResultado {
+  const cantidad = Math.max(1, Math.round(input.cantidad));
+  const horasImpresion = Math.max(0, input.horasImpresion);
+
+  // 1. Material
+  let costoMaterial = 0;
+  if (ctx.material.tecnologia === 'FDM') {
+    const gramos = Math.max(0, input.pesoGramos ?? 0);
+    const kg = gramos / 1000;
+    const kgConMerma = kg * (1 + ctx.material.mermaPorcentaje);
+    costoMaterial = kgConMerma * ctx.material.costoPorUnidad;
+  } else {
+    const ml = Math.max(0, input.volumenMl ?? 0);
+    const litros = ml / 1000;
+    const litrosConMerma = litros * (1 + ctx.material.mermaPorcentaje);
+    costoMaterial = litrosConMerma * ctx.material.costoPorUnidad;
+  }
+
+  // 2. Energía
+  const kwh = (ctx.impresora.potenciaPromedioW / 1000) * horasImpresion;
+  const costoEnergia = kwh * ctx.tarifaKwh;
+
+  // 3. Máquina (Amortización + Mantenimiento)
+  let costoMaquina = 0;
+  if (ctx.impresora.tarifaHoraManual !== undefined && ctx.impresora.tarifaHoraManual >= 0) {
+    costoMaquina = horasImpresion * ctx.impresora.tarifaHoraManual;
+  } else {
+    const amortizacionHora = ctx.impresora.vidaUtilHoras > 0
+      ? ctx.impresora.precioCompra / ctx.impresora.vidaUtilHoras
+      : 0;
+    const costoHoraMaquina = amortizacionHora + ctx.impresora.mantenimientoPorHora;
+    costoMaquina = horasImpresion * costoHoraMaquina;
+  }
+
+  // 4. Consumibles
+  let costoConsumibles = 0;
+  if (Array.isArray(input.consumibles)) {
+    for (const c of input.consumibles) {
+      costoConsumibles += Math.max(0, c.costoUnitario) * Math.max(0, c.unidadesConsumidas);
+    }
+  }
+
+  // 5. Mano de obra en tres partes
+  // Migración: si viene minutosAlistado se usa ese; si viene minutosSetup se mapea a alistado.
+  const minModelado = Math.max(0, input.minutosModelado ?? 0);
+  const minAlistado = Math.max(0, input.minutosAlistado ?? input.minutosSetup ?? 0);
+  const minPost = Math.max(0, input.minutosPostproceso);
+
+  const laborModelado = (minModelado / 60) * ctx.tarifaDisenoHora;
+  const laborAlistado = (minAlistado / 60) * ctx.tarifaOperadorHora;
+  const laborPost = (minPost / 60) * ctx.tarifaOperadorHora * cantidad;
+
+  // 6. Extras
+  const extras = Math.max(0, input.extrasDirectos);
+
+  // Subtotal técnico
+  const subtotalTecnico = costoMaterial + costoEnergia + costoMaquina + costoConsumibles +
+    laborModelado + laborAlistado + laborPost + extras;
+
+  // 7. Overhead (antes del fallo)
+  let costoOverhead = 0;
+  if (ctx.overhead.modo === 'porHora') {
+    const overheadCalculado = calcularTasaOverheadHora(ctx.overhead);
+    costoOverhead = horasImpresion * overheadCalculado.tasa;
+  } else {
+    costoOverhead = subtotalTecnico * ctx.overhead.porcentajeFallback;
+  }
+
+  const baseConOverhead = subtotalTecnico + costoOverhead;
+
+  // 8. Contingencia por falla
+  const tasaFallaRaw = input.tasaFalla ?? ctx.tasaFallaPorDefecto;
+  const tasaFalla = Math.max(0, Math.min(0.40, tasaFallaRaw));
+  const factorFalla = 1 - tasaFalla;
+  const baseConFallos = factorFalla > 0 ? baseConOverhead / factorFalla : baseConOverhead;
+  const reservaFalla = baseConFallos - baseConOverhead;
+
+  const costoTotalLote = baseConFallos;
+  const costoDirectoLote = baseConOverhead;
+
+  // 9. Margen comercial real
+  const margenRaw = input.margen ?? ctx.margenPorDefecto;
+  const margen = Math.max(0, Math.min(0.90, margenRaw));
+  const divisorMargen = 1 - margen;
+  const precioBaseLote = divisorMargen > 0 ? baseConFallos / divisorMargen : baseConFallos;
+
+  // 10. Mínimos y redondeo
+  const precioBaseUnitario = precioBaseLote / cantidad;
+  const precioUnitarioConPiso = Math.max(ctx.minimoPorPieza, precioBaseUnitario);
+  const precioUnitarioFinal = redondearAlPaso(precioUnitarioConPiso, ctx.pasoRedondeo);
+  const precioTotalLote = precioUnitarioFinal * cantidad;
+
+  // Utilidad y margen realizado
+  const utilidad = precioTotalLote - costoTotalLote;
+  const margenRealizado = precioTotalLote > 0 ? utilidad / precioTotalLote : 0;
+
+  // Horas y rentabilidad temporal
+  const horasPersonaTotales = (minModelado + minAlistado + (minPost * cantidad)) / 60;
+  const utilidadPorHoraMaquina = horasImpresion > 0 ? utilidad / horasImpresion : null;
+  const utilidadPorHoraPersona = horasPersonaTotales > 0 ? utilidad / horasPersonaTotales : null;
+
+  return {
+    id: input.id,
+    nombrePieza: input.nombrePieza,
+    cantidad,
+    desgloseLote: {
+      material: costoMaterial,
+      energia: costoEnergia,
+      maquina: costoMaquina,
+      consumibles: costoConsumibles,
+      laborModelado,
+      laborAlistado,
+      laborPost,
+      laborSetup: laborAlistado, // Compatibilidad retroactiva
+      extras,
+      subtotalTecnico,
+      overhead: costoOverhead,
+      costoDirecto: costoDirectoLote,
+      reservaFalla,
+      costoTotal: costoTotalLote
+    },
+    costoUnitario: costoTotalLote / cantidad,
+    costoTotal: costoTotalLote,
+    precioUnitario: precioUnitarioFinal,
+    precioTotal: precioTotalLote,
+    margenRealizado,
+    utilidad,
+    utilidadPorHoraMaquina,
+    utilidadPorHoraPersona,
+    horasPersonaTotales
+  };
+}
+
+/**
+ * Genera la cascada analítica ordenada de 13 pasos para auditoría o visualización en UI.
+ */
+export function construirCascada(res: LineaResultado, ctx: PricingContext): PasoCascada[] {
+  const precioUnitario = res.precioUnitario;
+  const cant = res.cantidad;
+  const desg = res.desgloseLote;
+
+  const matUnit = desg.material / cant;
+  const enerUnit = desg.energia / cant;
+  const maqUnit = desg.maquina / cant;
+  const modUnit = desg.laborModelado / cant;
+  const aliUnit = desg.laborAlistado / cant;
+  const postUnit = desg.laborPost / cant;
+  const extUnit = (desg.extras + desg.consumibles) / cant;
+
+  const subtotalTecnicoUnit = desg.subtotalTecnico / cant;
+  const overheadUnit = desg.overhead / cant;
+  const baseConFallosUnit = desg.costoTotal / cant;
+  const margenMontoUnit = Math.max(0, precioUnitario - baseConFallosUnit);
+  const ivaUnit = precioUnitario * ctx.ivaTasa;
+  const totalLoteConIva = (precioUnitario + ivaUnit) * cant;
+
+  const calcPct = (monto: number): number => {
+    return precioUnitario > 0 ? (monto / precioUnitario) * 100 : 0;
+  };
+
+  let acc = 0;
+
+  acc += matUnit;
+  const p1: PasoCascada = {
+    clave: 'material',
+    etiqueta: 'Material',
+    monto: matUnit,
+    acumulado: acc,
+    tipo: 'componente',
+    porcentajeDelPrecio: calcPct(matUnit),
+    ayuda: 'Filamento o resina consumida incluyendo porcentaje de merma.'
+  };
+
+  acc += enerUnit;
+  const p2: PasoCascada = {
+    clave: 'energia',
+    etiqueta: 'Energía impresión',
+    monto: enerUnit,
+    acumulado: acc,
+    tipo: 'componente',
+    porcentajeDelPrecio: calcPct(enerUnit),
+    ayuda: 'Consumo eléctrico según potencia real y tarifa CFE.'
+  };
+
+  acc += maqUnit;
+  const p3: PasoCascada = {
+    clave: 'maquina',
+    etiqueta: 'Máquina',
+    monto: maqUnit,
+    acumulado: acc,
+    tipo: 'componente',
+    porcentajeDelPrecio: calcPct(maqUnit),
+    ayuda: 'Amortización por vida útil y mantenimiento preventivo.'
+  };
+
+  acc += modUnit;
+  const p4: PasoCascada = {
+    clave: 'labor_modelado',
+    etiqueta: 'Mano de obra: modelado',
+    monto: modUnit,
+    acumulado: acc,
+    tipo: 'componente',
+    porcentajeDelPrecio: calcPct(modUnit),
+    ayuda: 'Diseño/CAD prorrateado en el lote según tarifa de diseño.'
+  };
+
+  acc += aliUnit;
+  const p5: PasoCascada = {
+    clave: 'labor_alistado',
+    etiqueta: 'Mano de obra: alistado',
+    monto: aliUnit,
+    acumulado: acc,
+    tipo: 'componente',
+    porcentajeDelPrecio: calcPct(aliUnit),
+    ayuda: 'Laminado, calibración y carga de material.'
+  };
+
+  acc += postUnit;
+  const p6: PasoCascada = {
+    clave: 'labor_post',
+    etiqueta: 'Mano de obra: post-procesado',
+    monto: postUnit,
+    acumulado: acc,
+    tipo: 'componente',
+    porcentajeDelPrecio: calcPct(postUnit),
+    ayuda: 'Retiro de soportes, lavado, curado o acabado superficial.'
+  };
+
+  acc += extUnit;
+  const p7: PasoCascada = {
+    clave: 'extras',
+    etiqueta: 'Extras',
+    monto: extUnit,
+    acumulado: acc,
+    tipo: 'componente',
+    porcentajeDelPrecio: calcPct(extUnit),
+    ayuda: 'Herrajes, insertos, consumibles especiales y empaques.'
+  };
+
+  const p8: PasoCascada = {
+    clave: 'subtotal_tecnico',
+    etiqueta: '= Subtotal técnico',
+    monto: subtotalTecnicoUnit,
+    acumulado: subtotalTecnicoUnit,
+    tipo: 'subtotal',
+    porcentajeDelPrecio: calcPct(subtotalTecnicoUnit),
+    ayuda: 'Suma de costos directos de manufactura.'
+  };
+
+  const p9: PasoCascada = {
+    clave: 'overhead',
+    etiqueta: '+ Overhead',
+    monto: overheadUnit,
+    acumulado: subtotalTecnicoUnit + overheadUnit,
+    tipo: 'ajuste',
+    porcentajeDelPrecio: calcPct(overheadUnit),
+    ayuda: 'Gastos fijos de taller por hora de máquina.'
+  };
+
+  const p10: PasoCascada = {
+    clave: 'base_con_fallos',
+    etiqueta: '= Base con fallos',
+    monto: baseConFallosUnit,
+    acumulado: baseConFallosUnit,
+    tipo: 'subtotal',
+    porcentajeDelPrecio: calcPct(baseConFallosUnit),
+    ayuda: 'Costo total tras factor de contingencia por desperdicio.'
+  };
+
+  const p11: PasoCascada = {
+    clave: 'margen',
+    etiqueta: '+ Margen',
+    monto: margenMontoUnit,
+    acumulado: precioUnitario,
+    tipo: 'ajuste',
+    porcentajeDelPrecio: calcPct(margenMontoUnit),
+    ayuda: 'Margen comercial aplicado sobre el precio final.'
+  };
+
+  const p12: PasoCascada = {
+    clave: 'unitario_base',
+    etiqueta: 'Unitario (base)',
+    monto: precioUnitario,
+    acumulado: precioUnitario,
+    tipo: 'subtotal',
+    porcentajeDelPrecio: 100,
+    ayuda: 'Precio de venta unitario antes de impuestos.'
+  };
+
+  const p13: PasoCascada = {
+    clave: 'iva',
+    etiqueta: `+ IVA ${Math.round(ctx.ivaTasa * 100)}%`,
+    monto: ivaUnit,
+    acumulado: precioUnitario + ivaUnit,
+    tipo: 'ajuste',
+    porcentajeDelPrecio: calcPct(ivaUnit),
+    ayuda: 'Impuesto al valor agregado.'
+  };
+
+  const p14: PasoCascada = {
+    clave: 'total_lote',
+    etiqueta: 'Total × cantidad',
+    monto: totalLoteConIva,
+    acumulado: totalLoteConIva,
+    tipo: 'total',
+    porcentajeDelPrecio: 100,
+    ayuda: `Monto final por las ${cant} piezas incluyendo IVA.`
+  };
+
+  return [p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p13, p14];
+}
+
+/**
+ * Calcula los totales agregados de un ticket de cotización.
+ */
+export function calcularTicket(lineas: LineaResultado[], ctx: PricingContext): ResumenTicket {
+  let subtotalLineas = 0;
+  let costoTotalLineas = 0;
+
+  const desglose = {
+    material: 0,
+    energia: 0,
+    maquina: 0,
+    consumibles: 0,
+    laborModelado: 0,
+    laborAlistado: 0,
+    laborPost: 0,
+    extras: 0,
+    overhead: 0,
+    reservaFalla: 0,
+    envio: ctx.envio,
+    recargoUrgencia: 0,
+    utilidad: 0,
+    iva: 0
+  };
+
+  for (const l of lineas) {
+    subtotalLineas += l.precioTotal;
+    costoTotalLineas += l.costoTotal;
+
+    desglose.material += l.desgloseLote.material;
+    desglose.energia += l.desgloseLote.energia;
+    desglose.maquina += l.desgloseLote.maquina;
+    desglose.consumibles += l.desgloseLote.consumibles;
+    desglose.laborModelado += l.desgloseLote.laborModelado;
+    desglose.laborAlistado += l.desgloseLote.laborAlistado;
+    desglose.laborPost += l.desgloseLote.laborPost;
+    desglose.extras += l.desgloseLote.extras;
+    desglose.overhead += l.desgloseLote.overhead;
+    desglose.reservaFalla += l.desgloseLote.reservaFalla;
+  }
+
+  // Ajuste a mínimo de pedido
+  let ajusteMinimoPedido = 0;
+  if (lineas.length > 0 && subtotalLineas < ctx.minimoPedido) {
+    ajusteMinimoPedido = ctx.minimoPedido - subtotalLineas;
+  }
+
+  const subtotalConAjuste = subtotalLineas + ajusteMinimoPedido;
+  const recargoUrgencia = subtotalConAjuste * ctx.recargoUrgencia;
+  desglose.recargoUrgencia = recargoUrgencia;
+
+  const totalSinIva = subtotalConAjuste + recargoUrgencia + ctx.envio;
+  const iva = totalSinIva * ctx.ivaTasa;
+  desglose.iva = iva;
+
+  const totalConIva = totalSinIva + iva;
+  const costoTotalTicket = costoTotalLineas + ctx.envio;
+  const utilidadTotal = totalSinIva - costoTotalTicket;
+  desglose.utilidad = utilidadTotal;
+
+  const margenRealizadoTicket = totalSinIva > 0 ? utilidadTotal / totalSinIva : 0;
+
+  // Ganancia por redondeo y mínimos
+  let precioBaseSinRedondeoNiPiso = 0;
+  for (const l of lineas) {
+    const margen = ctx.margenPorDefecto;
+    const baseConFallos = l.desgloseLote.costoTotal;
+    const precioBase = (1 - margen) > 0 ? baseConFallos / (1 - margen) : baseConFallos;
+    precioBaseSinRedondeoNiPiso += precioBase;
+  }
+  const gananciaPorRedondeoYMinimos = Math.max(0, subtotalConAjuste - precioBaseSinRedondeoNiPiso);
+
+  return {
+    lineas,
+    subtotal: subtotalLineas,
+    ajusteMinimoPedido,
+    recargoUrgencia,
+    envio: ctx.envio,
+    totalSinIva,
+    iva,
+    totalConIva,
+    costoTotalTicket,
+    utilidadTotal,
+    margenRealizadoTicket,
+    gananciaPorRedondeoYMinimos,
+    desgloseAgregado: desglose
+  };
+}
 
 /*
- ===============================================================================
- CASO 1: FDM SIMPLE (1 sola pieza técnica en Bambu X1-Carbon, PLA Estándar)
- ===============================================================================
- Parámetros de entrada:
-   - Tecnología: FDM
-   - Cantidad: 1 pieza
-   - Peso: 80 g de PLA ($450 MXN / kg, merma 5% = 0.05)
-   - Tiempo de impresión: 4.0 horas
-   - Potencia promedio medida X1C: 105 W
-   - Tarifa eléctrica CFE: $3.50 MXN / kWh
-   - Impresora adquisición: $28,000 MXN, vida útil: 4,000 h, mantto: $2.00 MXN/h
-     -> Amortización/h = 28000 / 4000 = $7.00/h
-     -> Tarifa máquina total/h = $7.00 + $2.00 = $9.00/h
-   - Consumibles: Ninguno adicional
-   - Labor: Setup 15 min (0.25 h), Postproceso 5 min (0.0833 h)
-   - Tarifa técnico: $120.00 MXN / h
-   - Extras: $0.00
-   - Tasa de falla: 5% (0.05)
-   - Margen comercial deseado: 35% (0.35)
-   - Mínimo por pieza: $50.00 MXN
-   - Paso redondeo: $5.00 MXN
+================================================================================
+CASO DE PRUEBA DE REFERENCIA (VERIFICACIÓN PASO A PASO CON CALCULADORA)
+================================================================================
 
- Cálculos a mano paso a paso:
-   1. Material = (80 / 1000) * 450 * (1 + 0.05) = 0.08 * 450 * 1.05 = $37.8000 MXN
-   2. Energía  = (105 / 1000) * 4.0 * 3.50 = 0.105 * 4 * 3.50 = $1.4700 MXN
-   3. Máquina  = 4.0 * ($7.00 + $2.00) = 4.0 * $9.00 = $36.0000 MXN
-   4. Consumibles = $0.00 MXN
-   5. Labor:
-      - Setup (1 vez): (15 / 60) * 120 = 0.25 * 120 = $30.0000 MXN
-      - Postproceso (1 pieza): (5 / 60) * 120 * 1 = $10.0000 MXN
-      - Total Labor = $40.0000 MXN
-   6. Extras   = $0.00 MXN
-   -----------------------------------------------------------------------------
-   Costo Directo = 37.80 + 1.47 + 36.00 + 0 + 40.00 + 0 = $115.2700 MXN
-   7. Reserva Falla = 115.27 / (1 - 0.05) = 115.27 / 0.95 = $121.3368 MXN
-      (Monto de la reserva: $6.0668 MXN)
-   -----------------------------------------------------------------------------
-   Precio Base = 121.3368 / (1 - 0.35) = 121.3368 / 0.65 = $186.6720 MXN
-   Precio Unitario con paso de $5 (Math.ceil a múltiplo de 5):
-     186.6720 / 5 = 37.3344 -> ceil = 38 -> 38 * 5 = $190.00 MXN
-   Precio Total (1 unidad) = $190.00 MXN
-   Utilidad neta: $190.00 - $121.34 = $68.66 MXN (Margen realizado: 36.14%)
-
- ===============================================================================
- CASO 2: MSLA CON POSTPROCESO EXIGENTE (Figura en Resina Tough + Lavado/Curado)
- ===============================================================================
- Parámetros de entrada:
-   - Tecnología: MSLA
-   - Cantidad: 1 pieza
-   - Resina: 120 ml ($950 MXN / Litro, merma 10% = 0.10 por soportes y película FEP)
-   - Tiempo de impresión: 6.0 horas
-   - Potencia promedio Elegoo Saturn: 60 W
-   - Tarifa eléctrica CFE: $3.50 MXN / kWh
-   - Impresora: $15,000 MXN, vida útil: 2,500 h, mantto: $1.50 MXN/h
-     -> Amortización/h = 15000 / 2500 = $6.00/h
-     -> Tarifa máquina/h = $6.00 + $1.50 = $7.50/h
-   - Consumibles específicos MSLA:
-     * Película FEP: $400 MXN, vida útil 100 horas -> $4.00/h * 6h = $24.00 MXN
-     * Alcohol Isopropílico (IPA): $90 MXN/litro, procesa 5 litros de resina
-       -> $90 / 5 = $18.00 por litro procesado -> 0.120 L * $18.00 = $2.16 MXN
-     Total Consumibles = 24.00 + 2.16 = $26.1600 MXN
-   - Labor:
-     * Setup (revisión isla, vaciado, soportes): 20 min = 0.3333 h
-     * Postproceso (lavado ultrasonido, retiro soporte bisturí, curado UV): 25 min = 0.4166 h
-     * Tarifa operador: $140.00 MXN / h
-   - Extras (caja rígida y protección para figura frágil): $35.00 MXN
-   - Tasa de falla: 12% (0.12)  [MSLA es más propensa a delaminación]
-   - Margen comercial deseado: 40% (0.40)
-   - Paso redondeo: $10.00 MXN
-
- Cálculos a mano paso a paso:
-   1. Material = (120 / 1000) * 950 * (1 + 0.10) = 0.12 * 950 * 1.10 = $125.4000 MXN
-   2. Energía  = (60 / 1000) * 6.0 * 3.50 = 0.06 * 6 * 3.50 = $1.2600 MXN
-   3. Máquina  = 6.0 * $7.50 = $45.0000 MXN
-   4. Consumibles = $26.1600 MXN
-   5. Labor:
-      - Setup: (20 / 60) * 140 = $46.6667 MXN
-      - Postproceso: (25 / 60) * 140 = $58.3333 MXN
-      - Total Labor = $105.0000 MXN
-   6. Extras   = $35.0000 MXN
-   -----------------------------------------------------------------------------
-   Costo Directo = 125.40 + 1.26 + 45.00 + 26.16 + 105.00 + 35.00 = $337.8200 MXN
-   7. Reserva Falla = 337.82 / (1 - 0.12) = 337.82 / 0.88 = $383.8864 MXN
-      (Monto de la reserva: $46.0664 MXN)
-   -----------------------------------------------------------------------------
-   Precio Base = 383.8864 / (1 - 0.40) = 383.8864 / 0.60 = $639.8106 MXN
-   Precio Unitario con paso de $10 (Math.ceil a múltiplo de 10):
-     639.8106 / 10 = 63.981 -> ceil = 64 -> 64 * 10 = $640.00 MXN
-   Precio Total = $640.00 MXN
-   Utilidad neta: $640.00 - $383.89 = $256.11 MXN (Margen realizado: 40.02%)
-
- ===============================================================================
- CASO 3: LOTE DE 25 PIEZAS FDM (Demostración de dilución de Setup)
- ===============================================================================
- Parámetros de entrada:
-   - Tecnología: FDM
-   - Cantidad: 25 piezas
-   - Peso por pieza: 30 g -> Lote total (25 uds) = 750 g de PETG ($550 MXN / kg, merma 4% = 0.04)
-   - Horas totales de máquina (impresión serial o por camas): 35.0 horas
-   - Potencia promedio: 110 W
-   - Tarifa eléctrica CFE: $3.20 MXN / kWh
-   - Impresora: Amortización + Mantto = $8.50 MXN / hora
-   - Consumibles: Boquilla endurecida prorrateada ($250 / 500 horas) * 35 h = $17.50 MXN
-   - Labor:
-     * Setup lote: 30 min (0.5 h) a $130 MXN/h = $65.00 MXN (INCURRIDO 1 VEZ)
-     * Postproceso por pieza: 3 min c/u -> 25 piezas * 3 min = 75 min = 1.25 h
-       -> 1.25 h * $130 MXN/h = $162.50 MXN
-   - Extras: 25 insertos roscados M3 ($2.00 c/u) = $50.00 MXN
-   - Tasa de falla: 6% (0.06)
-   - Margen comercial deseado: 30% (0.30)
-   - Paso redondeo: $1.00 MXN
-
- Cálculos a mano paso a paso:
-   1. Material = (750 / 1000) * 550 * (1 + 0.04) = 0.75 * 550 * 1.04 = $429.0000 MXN
-   2. Energía  = (110 / 1000) * 35.0 * 3.20 = 0.11 * 35 * 3.20 = $12.3200 MXN
-   3. Máquina  = 35.0 * $8.50 = $297.5000 MXN
-   4. Consumibles = $17.5000 MXN
-   5. Labor:
-      - Setup (único): $65.0000 MXN  [Representa solo $2.60 por pieza en lote de 25]
-      - Postproceso (25 uds): $162.5000 MXN
-      - Total Labor = $227.5000 MXN
-   6. Extras   = $50.0000 MXN
-   -----------------------------------------------------------------------------
-   Costo Directo Lote = 429.00 + 12.32 + 297.50 + 17.50 + 227.50 + 50.00 = $1,033.8200 MXN
-   7. Reserva Falla Lote = 1,033.82 / (1 - 0.06) = 1,033.82 / 0.94 = $1,099.8085 MXN
-      (Costo unitario real por pieza: $1,099.81 / 25 = $43.9923 MXN/pieza)
-   -----------------------------------------------------------------------------
-   Precio Base Lote = 1,099.8085 / (1 - 0.30) = 1,099.8085 / 0.70 = $1,571.1550 MXN
-   Precio Base Unitario = 1,571.1550 / 25 = $62.8462 MXN
-   Precio Unitario con paso de $1 (Math.ceil a múltiplo de 1):
-     Math.ceil(62.8462) = $63.00 MXN / pieza
-   Precio Total del Lote (25 x $63.00) = $1,575.00 MXN
-   Utilidad neta: $1,575.00 - $1,099.81 = $475.19 MXN (Margen realizado: 30.17%)
- ===============================================================================
+Pieza de prueba:
+  - FDM: 80g PLA ($450/kg, merma 5% => 84g => $37.80)
+  - 3.5 horas de impresión
+  - Impresora FDM: 120W, $15,000 compra, 4,000 h vida útil, $2/h mantenimiento
+    -> Energía: 0.12 kW * 3.5 h * $3.50/kWh = $1.47
+    -> Amortización: ($15,000 / 4,000) = $3.75/h + $2.00/h = $5.75/h * 3.5 h = $20.125
+  - Labor:
+    -> Modelado: 0 min => $0.00
+    -> Alistado: 10 min a $120/h => $20.00
+    -> Postproceso: 10 min a $120/h * 1 pieza => $20.00
+  - Extras: $0.00
+  - Subtotal técnico = 37.80 + 1.47 + 20.125 + 0 + 20.00 + 20.00 + 0 = $79.395
+  - Overhead:
+    -> $4,000 / 160 h = $25.00/h
+    -> $25.00 * 3.5 h = $87.50
+  - Base con overhead = 79.395 + 87.50 = $166.895
+  - Tasa de fallo (8%):
+    -> $166.895 / (1 - 0.08) = $166.895 / 0.92 = $181.408
+    -> Reserva de fallo = $14.513
+  - Margen objetivo (45%):
+    -> $181.408 / (1 - 0.45) = $181.408 / 0.55 = $329.832
+  - Redondeo (paso $1.00):
+    -> Math.ceil(329.832) = $330.00
+  - Utilidad: $330.00 - $181.408 = $148.592 (45.03% margen realizado)
+  - Utilidad / h máquina = $148.592 / 3.5 = $42.45 MXN/h
+  - Horas persona: (0 + 10 + 10) / 60 = 0.333 h
+  - Utilidad / h persona = $148.592 / 0.333 = $445.78 MXN/h
+================================================================================
 */

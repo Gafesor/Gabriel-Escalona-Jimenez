@@ -75,6 +75,8 @@ export interface TicketCalculadoResultado {
   desgloseAgregado: DesgloseAgregadoTicket;
 }
 
+export type ResultadoTicket = TicketCalculadoResultado;
+
 export interface CalcularTicketOpts {
   urgente?: boolean;
   envio?: number;
@@ -357,6 +359,13 @@ export function autoVerificarMotor(): boolean {
   const ctxTest: PricingContext = {
     tarifaKwh: 3.50,
     tarifaOperadorHora: 120.00,
+    tarifaDisenoHora: 250.00,
+    overhead: {
+      modo: 'porHora',
+      costosFijosMensuales: 0,
+      horasProductivasMes: 160,
+      porcentajeFallback: 0
+    },
     margenPorDefecto: 0.35,
     tasaFallaPorDefecto: 0.05,
     minimoPorPieza: 50.00,
